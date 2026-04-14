@@ -1,0 +1,90 @@
+\documentclass[conference]{IEEEtran}
+\usepackage{hyperref}
+\IEEEoverridecommandlockouts
+% The preceding line is only needed to identify funding in the first footnote. If that is unneeded, please comment it out.
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage[ruled,vlined]{algorithm2e}
+\usepackage{natbib}
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+\pagestyle{plain}
+\title{CS219c project proposal}\\
+
+\author{
+\IEEEauthorblockN{1\textsuperscript{st} 
+Ingeborg Lundamo Lien}
+\IEEEauthorblockA{
+\textit{UC Berkeley}\\
+Berkeley, United States \\
+lundamo@berkeley.edu}
+\and
+\IEEEauthorblockN{1\textsuperscript{st} 
+Jo Gramnaes Tjernshaugen}
+\IEEEauthorblockA{
+\textit{UC Berkeley}\\
+Berkeley, United States \\
+jogt@berkeley.edu}
+\and
+\IEEEauthorblockN{1\textsuperscript{st} 
+Madelen Hellervik Lothe}
+\IEEEauthorblockA{
+\textit{UC Berkeley}\\
+Berkeley, United States \\
+madelen\_hl@berkeley.edu}
+}
+
+\date{February 2026}
+\setlength{\columnsep}{1cm}
+\begin{document}
+
+\maketitle
+
+\subsection{Problem definition and motivation}
+
+The current specifications for autonomous driving safety remain limited in it's realism. Collision avoidance is typically modeled as a binary event. However, real-world collisions safety outcomes are far more nuanced, and depend on collision factors such as speed, angle, and type of crash. These differences effect the injury severity and damages, this is not modeled in the current implementation.
+
+Autonomous driving systems navigate situations where avoiding all negative outcomes is impossible. in these cases, the system should be able to reason about the tradeoffs and choose the least harmful. In the current hierarchy, rules are structured to prioritize different outcomes according to their importance. However, because the current model does not sufficiently distinguish between different types and severity of collisions, different collision events are treated as equally undesirable, not taking into account varying levels of risk and harm associated with them. 
+
+In this project we aim to expand the current benchmark by introducing a more comprehensive hierarchy of outcomes by incorporating more realistic and context-sensitive rules. We want to improve the benchmarks ability to model real-world driving risks to get an even more compatible decision making process which also complies to suitable ethical standards. This implies evaluating how the vehicle prioritize itself over its surroundings and other who participate in traffic. While we expand and improve the current benchmark, we also want to preserve the ethical grounding that the prior work has established.
+
+\subsection{Literature survey}
+
+Prioritized multi-objective specifications are common in autonomous driving and rulebooks of objectives provide a formal framework for them. Censi et al.~\cite{censi2019rulebooks} discuss using a set of rules with a partial ordering to model policy tradeoffs in autonomous vehicles, and how multiple objectives can be composed together.
+
+Chang et al.~\cite{chang2024dynamicrulebooks} extend this framework with dynamic rulebooks, which can be used to model changing priorities in more complex environments, and introduce an algorithm for simulation-based falsification.
+
+In Chang et al.~\cite{chang2026scenicrules}, an automated benchmark based on hierarchical specification of objectives is implemented and shown to align favorably with human preferences over driving behavior in labeled comparisons.
+
+Tsoi et al.~\cite{tsoi2015crashseverity} discuss crash severity metrics such as delta-v, occupant impact velocity, and acceleration severity index, and how well they align with real harm to individuals.
+
+Our main contribution is to design and evaluate more fine-grained collision/harm objectives within the ScenicRules/rulebook framework, compare alternative severity metrics for their suitability as benchmark objectives, and broaden the benchmark by proposing design variants for existing non-collision rules, and introducing new rule types that capture additional real-world driving tradeoffs beyond collisions. We will implement multiple rulebook variants reflecting these changes and evaluate them through simulation-based falsification and behavioral comparison across scenarios.
+
+\subsection{Time management and labor division}
+The work will be divided into several smaller subgoals that will be completed during the semester and ensure a steady workflow. The workload will be divided between the group members based on background knowledge. As one of the team member has a broad and extensive background and study discipline within programming and software development, they will have the lead responsibility on the development part of the project. The other two team members have a deeper background in mathematics and are easier equipped to expand the number of rules, as well as considering the robustness of the system. As automating and fine-tuning automation system also requires the system desinger to answer questions regarding values, this is something that these two students have a stronger fundamentals of with courses related to system design and value alignment within AI.
+
+\subsubsection{First Milestone}
+The students should have a through understanding of the prior work and gathered all relevant sources that could affect the direction of the expansion of the rulebook. The students responsible for defining the new rules that granulate severities should have made a strong progress in which manner the rules can get more expansive and better grasp the relevant aspects of the world as well as identified if any ethical concerns applies to what they have found. While all students has a responsibility of understanding the prior code base, the student with most programming experience should research if there are parts of the prior work we can leverage too get more accurate and rewarding adjustments than initial thought. They shall also test out some of the rules to ensure deployment and research how we best can derive implicit driving objectives from real-world driving data as our stretch goal.
+
+\subsubsection{Second Milestone}
+All of the rules should be finalized and simultaneously implemented to the code base, so that the implementation are coming along and potential challenges is early detected. We should have clear encoded results to show for on the project update and only have minor tasks left to do afterwards. 
+
+\subsubsection{Final delivery}
+This will leave only finalization of the work and writing the research paper after the second project update April 20, as well as making necessary that we might get feedback on. This also leaves us with time to catch up if any work is delayed or turn out to be more troublesome than first anticipated.
+
+%Update 18.mars
+%- clearly defined what we want to improve, mathematical and in terms of coding, rules
+%- Har satt oss inn i state of art, og hva som er gjort på forhånd
+%Update 20.april
+%Final: 1.mai
+
+\bibliographystyle{plain}
+\bibliography{references}
+
+\end{document}
+
