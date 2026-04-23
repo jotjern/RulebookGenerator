@@ -1,5 +1,6 @@
 import os
 import json
+import hashlib
 import sqlite3
 from pathlib import Path
 from collections import Counter
@@ -10,10 +11,37 @@ import openai
 client = openai.Client(api_key=os.environ["OPENAI_API_KEY"])
 
 MODEL = "gpt-5.4"
-FILE_ID = "file-31UZ5xWPohwwSF7bNAhUMK"
+PDF_PATH = Path("california-drivers-handbook.pdf")
 CACHE_DIR = Path("cache")
 CACHE_DIR.mkdir(exist_ok=True)
+FILE_ID_CACHE = CACHE_DIR / "file_id.txt"
 DB_PATH = Path("rulebook_pipeline.db")
+
+
+def ensure_file_uploaded(pdf_path: Path) -> str:
+    """Return an OpenAI file_id for the handbook PDF.
+
+    Uploads the PDF on first run and caches the resulting id to
+    cache/file_id.txt. On subsequent runs the cached id is reused, unless
+    the file has been deleted server-side — in which case we re-upload.
+    """
+    if FILE_ID_CACHE.exists():
+        cached = FILE_ID_CACHE.read_text().strip()
+        if cached:
+            try:
+                client.files.retrieve(cached)
+                print(f"  [file_id cache hit: {cached}]")
+                return cached
+            except Exception as e:
+                print(f"  [cached file_id {cached} unusable ({e}); re-uploading]")
+    if not pdf_path.exists():
+        raise FileNotFoundError(f"PDF not found at {pdf_path}")
+    print(f"  [uploading {pdf_path} to OpenAI…]")
+    with pdf_path.open("rb") as f:
+        uploaded = client.files.create(file=f, purpose="user_data")
+    FILE_ID_CACHE.write_text(uploaded.id)
+    print(f"  [uploaded, file_id={uploaded.id}]")
+    return uploaded.id
 
 
 # ---------------------------------------------------------------------------
@@ -101,11 +129,22 @@ def init_database():
     return conn
 
 
-def cached_api_call(cache_key, fn):
-    """Cache API results to JSON files so we don't burn credits re-running."""
-    cache_file = CACHE_DIR / f"{cache_key}.json"
+def _fingerprint(payload):
+    """Stable short hash of any JSON-serializable payload."""
+    blob = json.dumps(payload, sort_keys=True, default=str).encode()
+    return hashlib.sha256(blob).hexdigest()[:12]
+
+
+def cached_api_call(cache_key, fn, fingerprint_payload):
+    """Cache API results keyed by (step, fingerprint of prompt+model).
+
+    Any change to the prompt text, schema, or model invalidates the cache
+    automatically — no need to manually delete files when prompts evolve.
+    """
+    fp = _fingerprint({"model": MODEL, "payload": fingerprint_payload})
+    cache_file = CACHE_DIR / f"{cache_key}.{fp}.json"
     if cache_file.exists():
-        print(f"  [cache hit: {cache_file}]")
+        print(f"  [cache hit: {cache_file.name}]")
         return json.loads(cache_file.read_text())
     result = fn()
     cache_file.write_text(json.dumps(result, indent=2))
@@ -133,7 +172,7 @@ def retrieve_step_from_db(conn, step_id):
 # ---------------------------------------------------------------------------
 # Step 1 — Extract simulation-relevant driving rules from the handbook PDF
 # ---------------------------------------------------------------------------
-def step1_extract_rules():
+def step1_extract_rules(file_id: str):
     """
     Ask the model to read the California Driver's Handbook and return only
     rules that are relevant to autonomous-vehicle driving simulation
@@ -141,75 +180,69 @@ def step1_extract_rules():
     avoidance). Administrative rules (licensing, registration, DUI paperwork)
     are excluded at this stage.
     """
+    prompt_text = (
+        "You are helping build the ScenicRules autonomous-driving "
+        "safety benchmark.\n\n"
+        f"{SIMULATION_CONTEXT}\n\n"
+        "Extract a list of driving rules from this California Driver's "
+        "Handbook that can realistically be violated — and, crucially, "
+        "evaluated — against a realized ego trajectory in the simulator "
+        "described above. A rule is only useful if it can be computed "
+        "from the observable state listed in the simulation context.\n\n"
+        "Focus on rules about:\n"
+        "  • Collision avoidance with vehicles, pedestrians, bicycles\n"
+        "  • Near-collision risk / time-to-collision style clearance\n"
+        "  • Staying inside the drivable region\n"
+        "  • Correct side / correct direction of travel\n"
+        "  • Lane keeping, lane centering, lane-change execution\n"
+        "  • Right-of-way expressible as geometric yielding behavior\n"
+        "  • Speed limits when lane speed limit is available\n"
+        "  • Following distance and lateral clearance (incl. passing\n"
+        "    a bicyclist)\n"
+        "  • Comfort properties inferable from motion (acceleration,\n"
+        "    jerk)\n\n"
+        "Exclude rules whose evaluation would require information the\n"
+        "simulator does not expose — in particular:\n"
+        "  • Traffic light or stop sign state\n"
+        "  • Turn signals, brake lights, horn, gestures, eye contact,\n"
+        "    driver intent\n"
+        "  • Weather, lighting, visibility, road surface\n"
+        "  • Licensing, registration, paperwork, DUI, equipment,\n"
+        "    inspections, parking, passenger conduct\n"
+        "  • Emergency-vehicle rules that depend on lights/sirens\n"
+        "    (keep only the geometric yielding component, if any)\n\n"
+        "Prefer rules that are scenario-agnostic and expressible as a\n"
+        "continuous violation magnitude over a trajectory. Return each\n"
+        "rule as a short, precise statement."
+    )
+    schema = {
+        "type": "object",
+        "properties": {
+            "rules": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["rules"],
+        "additionalProperties": False,
+    }
+
     def call():
         response = client.responses.create(
             model=MODEL,
             input=[{
                 "role": "user",
                 "content": [
-                    {
-                        "type": "input_text",
-                        "text": (
-                            "You are helping build the ScenicRules autonomous-driving "
-                            "safety benchmark.\n\n"
-                            f"{SIMULATION_CONTEXT}\n\n"
-                            "Extract a list of driving rules from this California Driver's "
-                            "Handbook that can realistically be violated — and, crucially, "
-                            "evaluated — against a realized ego trajectory in the simulator "
-                            "described above. A rule is only useful if it can be computed "
-                            "from the observable state listed in the simulation context.\n\n"
-                            "Focus on rules about:\n"
-                            "  • Collision avoidance with vehicles, pedestrians, bicycles\n"
-                            "  • Near-collision risk / time-to-collision style clearance\n"
-                            "  • Staying inside the drivable region\n"
-                            "  • Correct side / correct direction of travel\n"
-                            "  • Lane keeping, lane centering, lane-change execution\n"
-                            "  • Right-of-way expressible as geometric yielding behavior\n"
-                            "  • Speed limits when lane speed limit is available\n"
-                            "  • Following distance and lateral clearance (incl. passing\n"
-                            "    a bicyclist)\n"
-                            "  • Comfort properties inferable from motion (acceleration,\n"
-                            "    jerk)\n\n"
-                            "Exclude rules whose evaluation would require information the\n"
-                            "simulator does not expose — in particular:\n"
-                            "  • Traffic light or stop sign state\n"
-                            "  • Turn signals, brake lights, horn, gestures, eye contact,\n"
-                            "    driver intent\n"
-                            "  • Weather, lighting, visibility, road surface\n"
-                            "  • Licensing, registration, paperwork, DUI, equipment,\n"
-                            "    inspections, parking, passenger conduct\n"
-                            "  • Emergency-vehicle rules that depend on lights/sirens\n"
-                            "    (keep only the geometric yielding component, if any)\n\n"
-                            "Prefer rules that are scenario-agnostic and expressible as a\n"
-                            "continuous violation magnitude over a trajectory. Return each\n"
-                            "rule as a short, precise statement."
-                        ),
-                    },
-                    {"type": "input_file", "file_id": FILE_ID},
+                    {"type": "input_text", "text": prompt_text},
+                    {"type": "input_file", "file_id": file_id},
                 ],
             }],
-            text={
-                "format": {
-                    "type": "json_schema",
-                    "name": "extracted_rules",
-                    "strict": True,
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "rules": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                            }
-                        },
-                        "required": ["rules"],
-                        "additionalProperties": False,
-                    },
-                }
-            },
+            text={"format": {"type": "json_schema", "name": "extracted_rules",
+                              "strict": True, "schema": schema}},
         )
         return json.loads(response.output_text)
 
-    return cached_api_call("step1_extract_rules", call)
+    return cached_api_call(
+        "step1_extract_rules", call,
+        fingerprint_payload={"prompt": prompt_text, "schema": schema, "file_id": file_id},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -244,72 +277,61 @@ def step2_categorize_and_severity(rules):
     and a flag indicating whether the rule involves a *collision* outcome
     (as opposed to e.g. a traffic-flow or signaling rule).
     """
+    prompt_text = (
+        "You are building a rulebook for the ScenicRules autonomous-driving "
+        "safety benchmark.\n\n"
+        f"{SIMULATION_CONTEXT}\n\n"
+        "For each driving rule below, provide:\n"
+        "1. **category** — one of: " + ", ".join(CATEGORIES) + "\n"
+        "2. **severity** (integer 1-5):\n" + SEVERITY_SCALE + "\n"
+        "   Ground severity in the actors the benchmark actually scores\n"
+        "   (ego, other vehicles, pedestrians, bicycles). Treat polygon\n"
+        "   intersection between ego and another object as the definition\n"
+        "   of a collision.\n"
+        "3. **involves_collision** — true if violating this rule can directly "
+        "cause or worsen a polygon-intersection event between ego and another "
+        "in-scope object; false if the violation is procedural or purely "
+        "about trajectory quality (e.g. lane centering with no nearby agent).\n"
+        "4. **rationale** — one sentence explaining the severity rating.\n\n"
+        f"Rules:\n{json.dumps(rules, indent=2)}"
+    )
+    schema = {
+        "type": "object",
+        "properties": {
+            "rules": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "rule": {"type": "string"},
+                        "category": {"type": "string", "enum": CATEGORIES},
+                        "severity": {"type": "integer"},
+                        "involves_collision": {"type": "boolean"},
+                        "rationale": {"type": "string"},
+                    },
+                    "required": ["rule", "category", "severity",
+                                 "involves_collision", "rationale"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["rules"],
+        "additionalProperties": False,
+    }
+
     def call():
         response = client.responses.create(
             model=MODEL,
-            input=[{
-                "role": "user",
-                "content": (
-                    "You are building a rulebook for the ScenicRules autonomous-driving "
-                    "safety benchmark.\n\n"
-                    f"{SIMULATION_CONTEXT}\n\n"
-                    "For each driving rule below, provide:\n"
-                    "1. **category** — one of: " + ", ".join(CATEGORIES) + "\n"
-                    "2. **severity** (integer 1-5):\n" + SEVERITY_SCALE + "\n"
-                    "   Ground severity in the actors the benchmark actually scores\n"
-                    "   (ego, other vehicles, pedestrians, bicycles). Treat polygon\n"
-                    "   intersection between ego and another object as the definition\n"
-                    "   of a collision.\n"
-                    "3. **involves_collision** — true if violating this rule can directly "
-                    "cause or worsen a polygon-intersection event between ego and another "
-                    "in-scope object; false if the violation is procedural or purely "
-                    "about trajectory quality (e.g. lane centering with no nearby agent).\n"
-                    "4. **rationale** — one sentence explaining the severity rating.\n\n"
-                    f"Rules:\n{json.dumps(rules, indent=2)}"
-                ),
-            }],
-            text={
-                "format": {
-                    "type": "json_schema",
-                    "name": "categorized_rules",
-                    "strict": True,
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "rules": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "rule": {"type": "string"},
-                                        "category": {
-                                            "type": "string",
-                                            "enum": CATEGORIES,
-                                        },
-                                        "severity": {"type": "integer"},
-                                        "involves_collision": {"type": "boolean"},
-                                        "rationale": {"type": "string"},
-                                    },
-                                    "required": [
-                                        "rule",
-                                        "category",
-                                        "severity",
-                                        "involves_collision",
-                                        "rationale",
-                                    ],
-                                    "additionalProperties": False,
-                                },
-                            }
-                        },
-                        "required": ["rules"],
-                        "additionalProperties": False,
-                    },
-                }
-            },
+            input=[{"role": "user", "content": prompt_text}],
+            text={"format": {"type": "json_schema", "name": "categorized_rules",
+                              "strict": True, "schema": schema}},
         )
         return json.loads(response.output_text)
 
-    return cached_api_call("step2_categorize_severity", call)
+    return cached_api_call(
+        "step2_categorize_severity", call,
+        fingerprint_payload={"prompt": prompt_text, "schema": schema},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -321,46 +343,45 @@ def step3_build_hierarchy(categorized_rules):
     This is the core contribution described in the project proposal: moving
     beyond binary collision avoidance toward severity-aware prioritization.
     """
+    prompt_text = (
+        "You are designing a *rulebook hierarchy* for the ScenicRules\n"
+        "autonomous-driving benchmark.\n\n"
+        f"{SIMULATION_CONTEXT}\n\n"
+        "Background (from the project proposal):\n"
+        "Current AV benchmarks treat collision avoidance as binary. We want to\n"
+        "introduce severity-aware rules so the vehicle can reason about harm\n"
+        "tradeoffs when not all negative outcomes are avoidable. The hierarchy\n"
+        "must be usable on offline realizations — conflicts between rules need\n"
+        "to be expressible as geometric/kinematic situations the simulator can\n"
+        "actually produce (e.g. leaving drivable area vs. striking a VRU,\n"
+        "braking hard vs. rear-end exposure).\n\n"
+        "Given the categorized rules below, produce:\n\n"
+        "### 1. Priority tiers\n"
+        "Group rules into priority tiers (tier 1 = highest). The ordering\n"
+        "should reflect the ethical principle:\n"
+        "  human life > serious injury > minor injury > property damage > traffic flow\n"
+        "Within the safety tiers, pedestrian/cyclist safety ranks above\n"
+        "vehicle-occupant safety.\n\n"
+        "### 2. Collision severity ordering\n"
+        "Define a severity ordering over collision *types* using crash-severity\n"
+        "metrics from the literature (delta-v, occupant impact velocity, etc.):\n"
+        "  • Head-on\n"
+        "  • Side-impact / T-bone\n"
+        "  • Rear-end\n"
+        "  • Sideswipe\n"
+        "  • Fixed-object\n"
+        "  • Low-speed contact / scrape\n"
+        "For each type give a typical delta-v range and expected harm level.\n\n"
+        "### 3. Pairwise priority edges\n"
+        "List concrete pairwise orderings (A > B) between specific rules,\n"
+        "especially where they might conflict in a simulation scenario.\n\n"
+        f"Rules:\n{json.dumps(categorized_rules, indent=2)}"
+    )
+
     def call():
         response = client.responses.create(
             model=MODEL,
-            input=[{
-                "role": "user",
-                "content": (
-                    "You are designing a *rulebook hierarchy* for the ScenicRules\n"
-                    "autonomous-driving benchmark.\n\n"
-                    f"{SIMULATION_CONTEXT}\n\n"
-                    "Background (from the project proposal):\n"
-                    "Current AV benchmarks treat collision avoidance as binary. We want to\n"
-                    "introduce severity-aware rules so the vehicle can reason about harm\n"
-                    "tradeoffs when not all negative outcomes are avoidable. The hierarchy\n"
-                    "must be usable on offline realizations — conflicts between rules need\n"
-                    "to be expressible as geometric/kinematic situations the simulator can\n"
-                    "actually produce (e.g. leaving drivable area vs. striking a VRU,\n"
-                    "braking hard vs. rear-end exposure).\n\n"
-                    "Given the categorized rules below, produce:\n\n"
-                    "### 1. Priority tiers\n"
-                    "Group rules into priority tiers (tier 1 = highest). The ordering\n"
-                    "should reflect the ethical principle:\n"
-                    "  human life > serious injury > minor injury > property damage > traffic flow\n"
-                    "Within the safety tiers, pedestrian/cyclist safety ranks above\n"
-                    "vehicle-occupant safety.\n\n"
-                    "### 2. Collision severity ordering\n"
-                    "Define a severity ordering over collision *types* using crash-severity\n"
-                    "metrics from the literature (delta-v, occupant impact velocity, etc.):\n"
-                    "  • Head-on\n"
-                    "  • Side-impact / T-bone\n"
-                    "  • Rear-end\n"
-                    "  • Sideswipe\n"
-                    "  • Fixed-object\n"
-                    "  • Low-speed contact / scrape\n"
-                    "For each type give a typical delta-v range and expected harm level.\n\n"
-                    "### 3. Pairwise priority edges\n"
-                    "List concrete pairwise orderings (A > B) between specific rules,\n"
-                    "especially where they might conflict in a simulation scenario.\n\n"
-                    f"Rules:\n{json.dumps(categorized_rules, indent=2)}"
-                ),
-            }],
+            input=[{"role": "user", "content": prompt_text}],
             text={
                 "format": {
                     "type": "json_schema",
@@ -444,7 +465,10 @@ def step3_build_hierarchy(categorized_rules):
         )
         return json.loads(response.output_text)
 
-    return cached_api_call("step3_hierarchy", call)
+    return cached_api_call(
+        "step3_hierarchy", call,
+        fingerprint_payload={"prompt": prompt_text},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -478,62 +502,61 @@ def step4_convert_to_stl(categorized_rules, conn):
     Each rule is mapped to an STL specification and value semantics (VS).
     Results are stored in the SQLite database.
     """
+    prompt_text = (
+        "You are converting driving rules into Signal Temporal Logic (STL) specifications.\n\n"
+        f"{SIMULATION_CONTEXT}\n\n"
+        "STL formulas and value semantics MUST be expressed purely over the\n"
+        "observable signals listed above. Do not invent fields the benchmark\n"
+        "does not expose (no traffic-light state, no turn signals, no intent,\n"
+        "no weather, no perception confidence).\n\n"
+        "Allowed symbol catalogue (map these to the observable state):\n"
+        "   p_i(t)       — polygonal footprint of object i at time t\n"
+        "   c_i(t)       — 2D center position of object i at time t\n"
+        "   v_i(t)       — 2D velocity of object i at time t\n"
+        "   a_i(t)       — acceleration of object i (derived from Δv)\n"
+        "   θ_i(t)       — orientation/yaw of object i\n"
+        "   type(i)      — object type (vehicle, pedestrian, bicycle)\n"
+        "   R_driv       — drivable-area polygon from the map\n"
+        "   L_k          — lane polygon / centerline / orientation for lane k\n"
+        "   lane(i, t)   — lane occupancy of object i at time t\n"
+        "   v_limit(L_k) — lane speed limit when available\n"
+        "   d_poly(i, j) — polygon-to-polygon distance\n"
+        "   d_cent(i, j) — center-to-center distance\n"
+        "   A, V         — sets of nearby vehicles and VRUs (proximity-filtered)\n"
+        "   Object 0 is always the ego vehicle.\n\n"
+        "For each rule, provide:\n"
+        "1. **stl_formula** — A formal STL specification using:\n"
+        "   - G = always/globally operator\n"
+        "   - F = eventually operator\n"
+        "   - U = until operator\n"
+        "   - [T_1, T_2] = time interval in seconds\n"
+        "   - ∀/∃ = universal/existential quantifiers\n"
+        "   - Only symbols from the catalogue above.\n\n"
+        "2. **value_semantics** — A quantitative, non-negative measure of\n"
+        "   violation severity, 0 when satisfied, larger when worse, so that\n"
+        "   max/sum aggregation over the rollout is meaningful:\n"
+        "   - For collision: kinetic energy loss (Joules)\n"
+        "   - For boundary/lane: distance from valid region (meters)\n"
+        "   - For clearance/TTC: shortfall below threshold (meters or seconds)\n"
+        "   - For speed/comfort: excess over limit (m/s, m/s², m/s³)\n"
+        "   - Formulated as a mathematical expression over the catalogue.\n\n"
+        "Examples provided:\n"
+        "Example 1: No collisions with VRUs\n"
+        f"  STL: {STL_EXAMPLES['no_collisions_vru']['stl_formula']}\n"
+        f"  VS:  {STL_EXAMPLES['no_collisions_vru']['value_sum']}\n\n"
+        "Example 2: No collisions with vehicles\n"
+        f"  STL: {STL_EXAMPLES['no_collisions_vehicles']['stl_formula']}\n"
+        f"  VS:  {STL_EXAMPLES['no_collisions_vehicles']['value_sum']}\n\n"
+        "Example 3: Staying within drivable area\n"
+        f"  STL: {STL_EXAMPLES['drivable_area']['stl_formula']}\n"
+        f"  VS:  {STL_EXAMPLES['drivable_area']['value_sum']}\n\n"
+        f"Rules to convert:\n{json.dumps(categorized_rules, indent=2)}"
+    )
+
     def call():
         response = client.responses.create(
             model=MODEL,
-            input=[{
-                "role": "user",
-                "content": (
-                    "You are converting driving rules into Signal Temporal Logic (STL) specifications.\n\n"
-                    f"{SIMULATION_CONTEXT}\n\n"
-                    "STL formulas and value semantics MUST be expressed purely over the\n"
-                    "observable signals listed above. Do not invent fields the benchmark\n"
-                    "does not expose (no traffic-light state, no turn signals, no intent,\n"
-                    "no weather, no perception confidence).\n\n"
-                    "Allowed symbol catalogue (map these to the observable state):\n"
-                    "   p_i(t)       — polygonal footprint of object i at time t\n"
-                    "   c_i(t)       — 2D center position of object i at time t\n"
-                    "   v_i(t)       — 2D velocity of object i at time t\n"
-                    "   a_i(t)       — acceleration of object i (derived from Δv)\n"
-                    "   θ_i(t)       — orientation/yaw of object i\n"
-                    "   type(i)      — object type (vehicle, pedestrian, bicycle)\n"
-                    "   R_driv       — drivable-area polygon from the map\n"
-                    "   L_k          — lane polygon / centerline / orientation for lane k\n"
-                    "   lane(i, t)   — lane occupancy of object i at time t\n"
-                    "   v_limit(L_k) — lane speed limit when available\n"
-                    "   d_poly(i, j) — polygon-to-polygon distance\n"
-                    "   d_cent(i, j) — center-to-center distance\n"
-                    "   A, V         — sets of nearby vehicles and VRUs (proximity-filtered)\n"
-                    "   Object 0 is always the ego vehicle.\n\n"
-                    "For each rule, provide:\n"
-                    "1. **stl_formula** — A formal STL specification using:\n"
-                    "   - G = always/globally operator\n"
-                    "   - F = eventually operator\n"
-                    "   - U = until operator\n"
-                    "   - [T_1, T_2] = time interval in seconds\n"
-                    "   - ∀/∃ = universal/existential quantifiers\n"
-                    "   - Only symbols from the catalogue above.\n\n"
-                    "2. **value_semantics** — A quantitative, non-negative measure of\n"
-                    "   violation severity, 0 when satisfied, larger when worse, so that\n"
-                    "   max/sum aggregation over the rollout is meaningful:\n"
-                    "   - For collision: kinetic energy loss (Joules)\n"
-                    "   - For boundary/lane: distance from valid region (meters)\n"
-                    "   - For clearance/TTC: shortfall below threshold (meters or seconds)\n"
-                    "   - For speed/comfort: excess over limit (m/s, m/s², m/s³)\n"
-                    "   - Formulated as a mathematical expression over the catalogue.\n\n"
-                    "Examples provided:\n"
-                    "Example 1: No collisions with VRUs\n"
-                    f"  STL: {STL_EXAMPLES['no_collisions_vru']['stl_formula']}\n"
-                    f"  VS:  {STL_EXAMPLES['no_collisions_vru']['value_sum']}\n\n"
-                    "Example 2: No collisions with vehicles\n"
-                    f"  STL: {STL_EXAMPLES['no_collisions_vehicles']['stl_formula']}\n"
-                    f"  VS:  {STL_EXAMPLES['no_collisions_vehicles']['value_sum']}\n\n"
-                    "Example 3: Staying within drivable area\n"
-                    f"  STL: {STL_EXAMPLES['drivable_area']['stl_formula']}\n"
-                    f"  VS:  {STL_EXAMPLES['drivable_area']['value_sum']}\n\n"
-                    f"Rules to convert:\n{json.dumps(categorized_rules, indent=2)}"
-                ),
-            }],
+            input=[{"role": "user", "content": prompt_text}],
             text={
                 "format": {
                     "type": "json_schema",
@@ -570,7 +593,10 @@ def step4_convert_to_stl(categorized_rules, conn):
         )
         return json.loads(response.output_text)
 
-    result = cached_api_call("step4_convert_to_stl", call)
+    result = cached_api_call(
+        "step4_convert_to_stl", call,
+        fingerprint_payload={"prompt": prompt_text},
+    )
 
     # Store STL conversions in database
     cursor = conn.cursor()
@@ -675,8 +701,11 @@ def main():
     conn = init_database()
     print("\n✓ Database initialized at", DB_PATH)
 
+    print("\n[0/4] Ensuring handbook PDF is uploaded …")
+    file_id = ensure_file_uploaded(PDF_PATH)
+
     print("\n[1/4] Extracting simulation-relevant rules from PDF …")
-    extracted = step1_extract_rules()
+    extracted = step1_extract_rules(file_id)
     rules = extracted["rules"]
     cache_step_to_db(conn, "step1_extract_rules", "Extract Rules", extracted)
     print(f"  → {len(rules)} rules extracted")
