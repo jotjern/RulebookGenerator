@@ -49,6 +49,7 @@ cache/
 *.sqlite
 *.sqlite3
 rulebook_output.json
+rulebook_output.json.bak
 
 # LaTeX build artifacts
 *.aux
