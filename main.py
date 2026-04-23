@@ -16,6 +16,59 @@ CACHE_DIR.mkdir(exist_ok=True)
 DB_PATH = Path("rulebook_pipeline.db")
 
 
+# ---------------------------------------------------------------------------
+# Shared simulation context — reused across prompts so the model understands
+# what the ScenicRules benchmark can actually observe and score.
+# ---------------------------------------------------------------------------
+SIMULATION_CONTEXT = """
+ScenicRules benchmark — simulation and evaluation model:
+
+A sample is one Scenic driving scenario executed in a 2D road-network simulator
+(MetaDrive or the Scenic Newtonian driving simulator). The scenario produces a
+finite discrete rollout of traffic participants over time, which is
+post-processed into a Realization object and evaluated offline.
+
+Map / world:
+  • Known 2D road map with drivable area, lane polygons, lane centerlines,
+    lane orientation, lane connectivity, lane maneuvers, intersections, and
+    sometimes lane speed limits.
+  • Scenarios cover lane following, straight driving, left/right turns, lane
+    changes, pedestrian crossings, and some bicycle-passing / near-accident
+    situations.
+
+Objects in scope:
+  • Ego vehicle (the evaluated subject)
+  • Other vehicles (cars, trucks)
+  • Vulnerable road users: pedestrians and bicycles
+
+Observable state per object per timestep:
+  • 2D position, 2D velocity, orientation/yaw
+  • Polygonal footprint from object dimensions
+  • Object type, stable identity across time
+Derived: acceleration (from Δv), lane occupancy, correct/incorrect-direction
+lane sets, polygon and center distances, polygon intersection (= collision),
+proximity-filtered nearby vehicles/VRUs, ego trajectory linestring, front/rear
+ego path segments, collision timeline.
+
+NOT observable / out of scope — do not rely on:
+  • Traffic light or stop sign state
+  • Turn signals, brake lights, horn, eye contact, gestures, human intent
+  • Raw sensor data, occlusion, perception uncertainty, detection confidence
+  • Weather, lighting, road surface, visibility
+  • Passenger-comfort signals not inferable from trajectory
+  • Legal doctrines or social norms not reducible to map + trajectory
+  • Internal policy/network state of the driving agent
+  • Fault attribution or what other agents "should have" intended
+
+Rule contract: a rule is a function over (realization, timestep) returning 0
+when no violation, a positive scalar otherwise, with larger values for more
+severe violations. Values are aggregated (max/sum) over the rollout. Rules
+must therefore be grounded in geometry, kinematics, lane topology, and
+observable interactions — measurable continuous violation magnitudes, not
+vague preferences.
+""".strip()
+
+
 def init_database():
     """Initialize SQLite database for caching all pipeline steps."""
     conn = sqlite3.connect(DB_PATH)
@@ -97,27 +150,39 @@ def step1_extract_rules():
                     {
                         "type": "input_text",
                         "text": (
-                            "You are helping build an autonomous-driving safety benchmark.\n\n"
+                            "You are helping build the ScenicRules autonomous-driving "
+                            "safety benchmark.\n\n"
+                            f"{SIMULATION_CONTEXT}\n\n"
                             "Extract a list of driving rules from this California Driver's "
-                            "Handbook that could realistically be violated — and evaluated — "
-                            "in a driving simulation.\n\n"
+                            "Handbook that can realistically be violated — and, crucially, "
+                            "evaluated — against a realized ego trajectory in the simulator "
+                            "described above. A rule is only useful if it can be computed "
+                            "from the observable state listed in the simulation context.\n\n"
                             "Focus on rules about:\n"
-                            "  • Vehicle movement and collision avoidance\n"
-                            "  • Right-of-way and yielding\n"
-                            "  • Speed limits and safe speed for conditions\n"
-                            "  • Lane usage, merging, and passing\n"
-                            "  • Turn signals and communication\n"
-                            "  • Traffic signals, signs, and markings\n"
-                            "  • Pedestrian and cyclist safety\n"
-                            "  • Emergency vehicle interaction\n"
-                            "  • Following distance\n\n"
-                            "Exclude rules about:\n"
-                            "  • Licensing, registration, and paperwork\n"
-                            "  • DUI / substance use\n"
-                            "  • Vehicle equipment and inspections\n"
-                            "  • Parking (unless it directly causes a collision hazard)\n"
-                            "  • Passenger conduct\n\n"
-                            "Return each rule as a short, precise statement."
+                            "  • Collision avoidance with vehicles, pedestrians, bicycles\n"
+                            "  • Near-collision risk / time-to-collision style clearance\n"
+                            "  • Staying inside the drivable region\n"
+                            "  • Correct side / correct direction of travel\n"
+                            "  • Lane keeping, lane centering, lane-change execution\n"
+                            "  • Right-of-way expressible as geometric yielding behavior\n"
+                            "  • Speed limits when lane speed limit is available\n"
+                            "  • Following distance and lateral clearance (incl. passing\n"
+                            "    a bicyclist)\n"
+                            "  • Comfort properties inferable from motion (acceleration,\n"
+                            "    jerk)\n\n"
+                            "Exclude rules whose evaluation would require information the\n"
+                            "simulator does not expose — in particular:\n"
+                            "  • Traffic light or stop sign state\n"
+                            "  • Turn signals, brake lights, horn, gestures, eye contact,\n"
+                            "    driver intent\n"
+                            "  • Weather, lighting, visibility, road surface\n"
+                            "  • Licensing, registration, paperwork, DUI, equipment,\n"
+                            "    inspections, parking, passenger conduct\n"
+                            "  • Emergency-vehicle rules that depend on lights/sirens\n"
+                            "    (keep only the geometric yielding component, if any)\n\n"
+                            "Prefer rules that are scenario-agnostic and expressible as a\n"
+                            "continuous violation magnitude over a trajectory. Return each\n"
+                            "rule as a short, precise statement."
                         ),
                     },
                     {"type": "input_file", "file_id": FILE_ID},
@@ -185,13 +250,20 @@ def step2_categorize_and_severity(rules):
             input=[{
                 "role": "user",
                 "content": (
-                    "You are building a rulebook for an autonomous-driving safety benchmark.\n\n"
+                    "You are building a rulebook for the ScenicRules autonomous-driving "
+                    "safety benchmark.\n\n"
+                    f"{SIMULATION_CONTEXT}\n\n"
                     "For each driving rule below, provide:\n"
                     "1. **category** — one of: " + ", ".join(CATEGORIES) + "\n"
                     "2. **severity** (integer 1-5):\n" + SEVERITY_SCALE + "\n"
+                    "   Ground severity in the actors the benchmark actually scores\n"
+                    "   (ego, other vehicles, pedestrians, bicycles). Treat polygon\n"
+                    "   intersection between ego and another object as the definition\n"
+                    "   of a collision.\n"
                     "3. **involves_collision** — true if violating this rule can directly "
-                    "cause or worsen a collision; false if the violation is procedural "
-                    "(e.g. failing to signal when nobody is nearby).\n"
+                    "cause or worsen a polygon-intersection event between ego and another "
+                    "in-scope object; false if the violation is procedural or purely "
+                    "about trajectory quality (e.g. lane centering with no nearby agent).\n"
                     "4. **rationale** — one sentence explaining the severity rating.\n\n"
                     f"Rules:\n{json.dumps(rules, indent=2)}"
                 ),
@@ -255,11 +327,17 @@ def step3_build_hierarchy(categorized_rules):
             input=[{
                 "role": "user",
                 "content": (
-                    "You are designing a *rulebook hierarchy* for autonomous driving.\n\n"
+                    "You are designing a *rulebook hierarchy* for the ScenicRules\n"
+                    "autonomous-driving benchmark.\n\n"
+                    f"{SIMULATION_CONTEXT}\n\n"
                     "Background (from the project proposal):\n"
                     "Current AV benchmarks treat collision avoidance as binary. We want to\n"
                     "introduce severity-aware rules so the vehicle can reason about harm\n"
-                    "tradeoffs when not all negative outcomes are avoidable.\n\n"
+                    "tradeoffs when not all negative outcomes are avoidable. The hierarchy\n"
+                    "must be usable on offline realizations — conflicts between rules need\n"
+                    "to be expressible as geometric/kinematic situations the simulator can\n"
+                    "actually produce (e.g. leaving drivable area vs. striking a VRU,\n"
+                    "braking hard vs. rear-end exposure).\n\n"
                     "Given the categorized rules below, produce:\n\n"
                     "### 1. Priority tiers\n"
                     "Group rules into priority tiers (tier 1 = highest). The ordering\n"
@@ -407,18 +485,42 @@ def step4_convert_to_stl(categorized_rules, conn):
                 "role": "user",
                 "content": (
                     "You are converting driving rules into Signal Temporal Logic (STL) specifications.\n\n"
+                    f"{SIMULATION_CONTEXT}\n\n"
+                    "STL formulas and value semantics MUST be expressed purely over the\n"
+                    "observable signals listed above. Do not invent fields the benchmark\n"
+                    "does not expose (no traffic-light state, no turn signals, no intent,\n"
+                    "no weather, no perception confidence).\n\n"
+                    "Allowed symbol catalogue (map these to the observable state):\n"
+                    "   p_i(t)       — polygonal footprint of object i at time t\n"
+                    "   c_i(t)       — 2D center position of object i at time t\n"
+                    "   v_i(t)       — 2D velocity of object i at time t\n"
+                    "   a_i(t)       — acceleration of object i (derived from Δv)\n"
+                    "   θ_i(t)       — orientation/yaw of object i\n"
+                    "   type(i)      — object type (vehicle, pedestrian, bicycle)\n"
+                    "   R_driv       — drivable-area polygon from the map\n"
+                    "   L_k          — lane polygon / centerline / orientation for lane k\n"
+                    "   lane(i, t)   — lane occupancy of object i at time t\n"
+                    "   v_limit(L_k) — lane speed limit when available\n"
+                    "   d_poly(i, j) — polygon-to-polygon distance\n"
+                    "   d_cent(i, j) — center-to-center distance\n"
+                    "   A, V         — sets of nearby vehicles and VRUs (proximity-filtered)\n"
+                    "   Object 0 is always the ego vehicle.\n\n"
                     "For each rule, provide:\n"
                     "1. **stl_formula** — A formal STL specification using:\n"
                     "   - G = always/globally operator\n"
                     "   - F = eventually operator\n"
                     "   - U = until operator\n"
                     "   - [T_1, T_2] = time interval in seconds\n"
-                    "   - p_i(t) = position of object i at time t\n"
-                    "   - ∀/∃ = universal/existential quantifiers\n\n"
-                    "2. **value_semantics** — A quantitative measure of violation severity:\n"
+                    "   - ∀/∃ = universal/existential quantifiers\n"
+                    "   - Only symbols from the catalogue above.\n\n"
+                    "2. **value_semantics** — A quantitative, non-negative measure of\n"
+                    "   violation severity, 0 when satisfied, larger when worse, so that\n"
+                    "   max/sum aggregation over the rollout is meaningful:\n"
                     "   - For collision: kinetic energy loss (Joules)\n"
-                    "   - For boundary: distance from valid region (meters)\n"
-                    "   - Formulated as mathematical expression\n\n"
+                    "   - For boundary/lane: distance from valid region (meters)\n"
+                    "   - For clearance/TTC: shortfall below threshold (meters or seconds)\n"
+                    "   - For speed/comfort: excess over limit (m/s, m/s², m/s³)\n"
+                    "   - Formulated as a mathematical expression over the catalogue.\n\n"
                     "Examples provided:\n"
                     "Example 1: No collisions with VRUs\n"
                     f"  STL: {STL_EXAMPLES['no_collisions_vru']['stl_formula']}\n"
