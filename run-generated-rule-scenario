@@ -1,0 +1,412 @@
+#!/usr/bin/env python3
+"""Checkout a generated rule branch and run its generated Scenic scenario."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+
+DEFAULT_REPO = Path(
+    os.environ.get("SCENIC_RULES_PATH", "/Users/jogramnaestjernshaugen/ScenicRules")
+)
+DEFAULT_MANIFEST = Path("generated_rule_scenarios.json")
+
+DEFAULT_BATCH_LIMIT = 7
+
+
+def run(
+    args: list[str],
+    cwd: Path,
+    *,
+    capture: bool = False,
+    check: bool = True,
+) -> subprocess.CompletedProcess:
+    kwargs = {
+        "cwd": cwd,
+        "text": True,
+    }
+    if capture:
+        kwargs["capture_output"] = True
+    result = subprocess.run(args, **kwargs)
+    if check and result.returncode != 0:
+        if capture:
+            message = result.stderr.strip() or result.stdout.strip()
+        else:
+            message = f"exit code {result.returncode}"
+        raise RuntimeError(f"{' '.join(args)} failed: {message}")
+    return result
+
+
+def git(repo: Path, *args: str, capture: bool = True, check: bool = True):
+    return run(["git", *args], repo, capture=capture, check=check)
+
+
+def load_manifest(path: Path) -> list[dict]:
+    if not path.exists():
+        raise RuntimeError(f"Manifest not found: {path}")
+    data = json.loads(path.read_text())
+    if isinstance(data, dict):
+        return data.get("entries", [])
+    if isinstance(data, list):
+        return data
+    raise RuntimeError(f"Unsupported manifest format: {path}")
+
+
+def current_branch(repo: Path) -> str:
+    return git(repo, "branch", "--show-current").stdout.strip()
+
+
+def require_clean_worktree(repo: Path) -> None:
+    status = git(repo, "status", "--porcelain").stdout.strip()
+    if status:
+        raise RuntimeError(
+            "ScenicRules worktree has uncommitted changes. "
+            "Commit/stash them or rerun with --allow-dirty."
+        )
+
+
+def branch_exists(repo: Path, branch: str) -> bool:
+    result = git(repo, "rev-parse", "--verify", branch, check=False)
+    return result.returncode == 0
+
+
+def wants_single_entry(args: argparse.Namespace) -> bool:
+    return (
+        args.branch is not None
+        or args.rule_id is not None
+        or args.scenario is not None
+    )
+
+
+def find_entry(entries: list[dict], args: argparse.Namespace) -> dict:
+    matches = entries
+    if args.rule_id is not None:
+        scenario_name = f"generated_rule_{args.rule_id}"
+        matches = [e for e in matches if e.get("scenario_name") == scenario_name]
+    if args.branch:
+        matches = [e for e in matches if e.get("branch") == args.branch]
+    if args.scenario:
+        matches = [
+            e
+            for e in matches
+            if e.get("scenario_name") == args.scenario
+            or e.get("scenario_path") == args.scenario
+        ]
+
+    if not matches:
+        raise RuntimeError("No manifest entry matched the requested selector.")
+    if len(matches) > 1:
+        labels = "\n".join(
+            f"  {e.get('branch')} -> {e.get('scenario_name')}" for e in matches[:20]
+        )
+        raise RuntimeError(
+            "Selector matched multiple entries. Use --branch, --rule-id, or "
+            f"--scenario to choose one:\n{labels}"
+        )
+    return matches[0]
+
+
+def rule_id_from_entry(entry: dict) -> str:
+    name = entry.get("scenario_name") or ""
+    m = re.match(r"generated_rule_(\d+)$", name)
+    return m.group(1) if m else "?"
+
+
+def print_rule_context(index: int, total: int, entry: dict) -> None:
+    rule_text = (entry.get("rule") or "").strip()
+    category = entry.get("category") or ""
+    status = entry.get("status") or ""
+    branch = entry.get("branch") or ""
+    scenario_name = entry.get("scenario_name") or ""
+    scenario_path = entry.get("scenario_path") or ""
+    rid = rule_id_from_entry(entry)
+    width = 78
+    print()
+    print("=" * width)
+    print(f"  Run {index}/{total}  rule id {rid}  [{category}]  manifest={status}")
+    print(f"  Scenario: {scenario_name}")
+    print(f"  Branch:   {branch}")
+    print(f"  File:     {scenario_path}")
+    print("-" * width)
+    if rule_text:
+        print(f"  {rule_text}")
+    print("=" * width)
+    print(flush=True)
+
+
+def extract_violation_summary(combined_log: str) -> str:
+    """Pull aggregate violation stats from ScenicRules run_evaluation log output."""
+    lines_out: list[str] = []
+    markers = (
+        "Average error value:",
+        "Rule violation count:",
+        "Number of unique violations:",
+        "Unique violations:",
+    )
+    for line in combined_log.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if any(m in s for m in markers):
+            lines_out.append(s)
+        elif "Results for " in s and "seed:" in s:
+            lines_out.append(s)
+    return "\n".join(lines_out)
+
+
+def print_violation_footer(summary: str, returncode: int) -> None:
+    print()
+    print("-" * 78)
+    print("  Violation scores (from evaluation log)")
+    print("-" * 78)
+    if returncode != 0:
+        print(f"  (run exited with status {returncode}; summary may be incomplete)")
+    if summary.strip():
+        for block_line in summary.splitlines():
+            print(f"  {block_line}")
+    else:
+        print("  (No aggregate violation lines found in output — check full log above.)")
+    print("-" * 78)
+    print(flush=True)
+
+
+def list_entries(entries: list[dict]) -> None:
+    for entry in entries:
+        print(
+            f"{entry.get('scenario_name', ''):22s} "
+            f"{entry.get('status', ''):10s} "
+            f"{entry.get('branch', '')}"
+        )
+
+
+def run_evaluation_for_entry(
+    repo: Path,
+    entry: dict,
+    args: argparse.Namespace,
+    *,
+    capture_for_summary: bool,
+) -> tuple[int, str]:
+    branch = entry["branch"]
+    scenario_path = entry["scenario_path"]
+    scenario_name = entry["scenario_name"]
+
+    if not branch_exists(repo, branch):
+        raise RuntimeError(f"Branch does not exist in ScenicRules: {branch}")
+
+    eval_dir = repo / "src" / "evaluation"
+    scenario_abs = repo / scenario_path
+    scenario_for_eval = os.path.relpath(scenario_abs, eval_dir)
+
+    venv_python = repo / ".venv" / "bin" / "python"
+    python_exe = args.python or (str(venv_python) if venv_python.exists() else "python3")
+
+    print(f"Checking out {branch}")
+    git(repo, "checkout", branch, capture=False)
+
+    if not scenario_abs.exists():
+        raise RuntimeError(
+            f"Scenario does not exist on branch {branch}: {scenario_path}"
+        )
+
+    overrides = args.overrides
+    if overrides and overrides[0] == "--":
+        overrides = overrides[1:]
+
+    command = [
+        python_exe,
+        "run_evaluation.py",
+        "--config-name=eval.yaml",
+        "hydra.job.chdir=False",
+        "hydra.output_subdir=null",
+        f"scenic.file_path={scenario_for_eval}",
+        f"scenic.scenario_name={scenario_name}",
+        f"experiment.num_samples={args.samples}",
+        f"experiment.num_seeds={args.seeds}",
+        "falsification.sampler_type=mab",
+        "falsification.active=True",
+        *overrides,
+    ]
+
+    print("Running simulation:")
+    print("  " + " ".join(command))
+
+    if capture_for_summary:
+        proc = subprocess.run(
+            command,
+            cwd=eval_dir,
+            capture_output=True,
+            text=True,
+        )
+        combined = (proc.stdout or "") + (proc.stderr or "")
+        print(combined, end="" if combined.endswith("\n") else "\n")
+        summary = extract_violation_summary(combined)
+        print_violation_footer(summary, proc.returncode)
+        return proc.returncode, summary
+
+    proc = subprocess.run(command, cwd=eval_dir, capture_output=False, text=True)
+    return proc.returncode, ""
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Checkout a generated rule branch and run its Scenic scenario.",
+        epilog=(
+            "Batch mode (no --branch / --rule-id / --scenario): --first N runs the first N "
+            "rows of generated_rule_scenarios.json in order. Default N is 7. "
+            "That is unrelated to evaluation --samples."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=DEFAULT_MANIFEST,
+        help=f"Rule/scenario manifest. Default: {DEFAULT_MANIFEST}",
+    )
+    parser.add_argument(
+        "--repo",
+        type=Path,
+        default=DEFAULT_REPO,
+        help=f"ScenicRules repo path. Default: {DEFAULT_REPO}",
+    )
+    parser.add_argument("--branch", help="Generated branch to checkout.")
+    parser.add_argument("--scenario", help="Scenario name or repo-relative path.")
+    parser.add_argument("--rule-id", type=int, help="Generated rule id, e.g. 100.")
+    parser.add_argument(
+        "--first",
+        "--limit",
+        type=int,
+        default=DEFAULT_BATCH_LIMIT,
+        metavar="N",
+        dest="batch_first_n",
+        help=(
+            "Batch mode only: number of manifest entries to run, counting from the "
+            f"first row in order (default {DEFAULT_BATCH_LIMIT}). "
+            "Use 0 to run all rows. Ignored when you pass --branch, --rule-id, or --scenario."
+        ),
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="List available generated scenario entries and exit.",
+    )
+    parser.add_argument(
+        "--samples",
+        type=int,
+        default=1,
+        help="Number of samples to run. Default: 1.",
+    )
+    parser.add_argument(
+        "--seeds",
+        type=int,
+        default=1,
+        help="Number of seeds to run. Default: 1.",
+    )
+    parser.add_argument(
+        "--python",
+        default=None,
+        help="Python executable. Default: ScenicRules .venv python if present, else python3.",
+    )
+    parser.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="Allow checkout when the ScenicRules worktree has uncommitted changes.",
+    )
+    parser.add_argument(
+        "--restore",
+        action="store_true",
+        help="Checkout the original branch after the run finishes.",
+    )
+    parser.add_argument(
+        "overrides",
+        nargs=argparse.REMAINDER,
+        help="Extra Hydra overrides after --, e.g. -- visualization.record_simulation=True",
+    )
+    args = parser.parse_args()
+
+    repo = args.repo.expanduser().resolve()
+    manifest = args.manifest.expanduser().resolve()
+    entries = load_manifest(manifest)
+
+    if args.list:
+        list_entries(entries)
+        return 0
+
+    if wants_single_entry(args):
+        to_run = [find_entry(entries, args)]
+        capture = True
+    else:
+        n = args.batch_first_n
+        if n == 0:
+            to_run = list(entries)
+        else:
+            to_run = entries[:n]
+        if not to_run:
+            print("No manifest entries to run.", file=sys.stderr)
+            return 1
+        capture = True
+        if n == 0:
+            batch_desc = f"all {len(to_run)} row(s) in the manifest"
+        elif len(to_run) < n:
+            batch_desc = (
+                f"{len(to_run)} row(s) (manifest only has that many; --first was {n})"
+            )
+        else:
+            batch_desc = f"the first {n} row(s) of the manifest"
+        print(
+            f"\nBatch mode: {batch_desc}, in file order. "
+            "Adjust count with --first N (alias --limit). Not related to --samples.\n",
+            flush=True,
+        )
+
+    if not args.allow_dirty:
+        require_clean_worktree(repo)
+
+    original_branch = current_branch(repo)
+    failed = 0
+
+    try:
+        for i, entry in enumerate(to_run, start=1):
+            print_rule_context(i, len(to_run), entry)
+            try:
+                code, _ = run_evaluation_for_entry(
+                    repo,
+                    entry,
+                    args,
+                    capture_for_summary=capture,
+                )
+                if code != 0:
+                    failed += 1
+            except RuntimeError as exc:
+                print(f"ERROR: {exc}", file=sys.stderr)
+                failed += 1
+                print_violation_footer("", 1)
+    finally:
+        if args.restore and original_branch:
+            cur = current_branch(repo)
+            if cur != original_branch:
+                print(f"Restoring {original_branch}")
+                git(repo, "checkout", original_branch, capture=False, check=False)
+
+    if len(to_run) > 1:
+        print()
+        print(
+            f"Batch finished: {len(to_run) - failed}/{len(to_run)} runs succeeded, "
+            f"{failed} failed."
+        )
+
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1)

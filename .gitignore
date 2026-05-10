@@ -5,6 +5,8 @@
 .idea/
 .vscode/
 .claude/
+.pi/
+.rulegen_docker_workspaces/
 
 # Environment and secrets
 .env

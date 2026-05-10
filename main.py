@@ -1,45 +1,90 @@
 import os
+import re
 import json
-import hashlib
-import sqlite3
+import subprocess
 from pathlib import Path
 from collections import Counter
 from datetime import datetime
 
 import openai
+from git import GitCommandError, Repo
+from database import (
+    cached_api_call as db_cached_api_call,
+    cache_step_to_db,
+    init_database,
+    retrieve_json_artifact,
+    store_json_artifact,
+    store_rule_scenario_manifest as db_store_rule_scenario_manifest,
+)
 
-client = openai.Client(api_key=os.environ["OPENAI_API_KEY"])
+
+def load_dotenv(path: Path = Path(".env")) -> None:
+    """Load KEY=VALUE pairs from .env without overriding existing env vars."""
+    if not path.exists():
+        return
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            os.environ.setdefault(key, value)
+
+
+load_dotenv()
+
+client = None
+
+
+def openai_client() -> openai.Client:
+    global client
+    if client is None:
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY is required for PDF/rule generation.")
+        client = openai.Client(api_key=api_key)
+    return client
 
 MODEL = "gpt-5.4"
+IMPLEMENTATION_HARNESS = "pi"
+IMPLEMENTATION_PROVIDER = "deepseek"
+IMPLEMENTATION_MODEL = "deepseek-v4-pro"
+IMPLEMENTATION_REASONING = "xhigh"
+PI_STREAM_EXTENSION_PATH = Path(".pi/extensions/stream-output/index.ts")
 PDF_PATH = Path("california-drivers-handbook.pdf")
-CACHE_DIR = Path("cache")
-CACHE_DIR.mkdir(exist_ok=True)
-FILE_ID_CACHE = CACHE_DIR / "file_id.txt"
 DB_PATH = Path("rulebook_pipeline.db")
+SCENIC_RULES_PATH = Path("/Users/jogramnaestjernshaugen/ScenicRules")
+RULE_ID_OFFSET = 100  # generated rules start at ID 100 to avoid conflicts
 
 
-def ensure_file_uploaded(pdf_path: Path) -> str:
+def ensure_file_uploaded(pdf_path: Path, conn) -> str:
     """Return an OpenAI file_id for the handbook PDF.
 
-    Uploads the PDF on first run and caches the resulting id to
-    cache/file_id.txt. On subsequent runs the cached id is reused, unless
-    the file has been deleted server-side — in which case we re-upload.
+    Uploads the PDF on first run and caches the resulting id in SQLite. On
+    subsequent runs the cached id is reused, unless the file has been deleted
+    server-side — in which case we re-upload.
     """
-    if FILE_ID_CACHE.exists():
-        cached = FILE_ID_CACHE.read_text().strip()
-        if cached:
-            try:
-                client.files.retrieve(cached)
-                print(f"  [file_id cache hit: {cached}]")
-                return cached
-            except Exception as e:
-                print(f"  [cached file_id {cached} unusable ({e}); re-uploading]")
+    cached_artifact = retrieve_json_artifact(conn, "openai_file_id")
+    cached = cached_artifact.get("file_id") if cached_artifact else None
+    if cached:
+        try:
+            openai_client().files.retrieve(cached)
+            print(f"  [file_id cache hit: {cached}]")
+            return cached
+        except Exception as e:
+            print(f"  [cached file_id {cached} unusable ({e}); re-uploading]")
     if not pdf_path.exists():
         raise FileNotFoundError(f"PDF not found at {pdf_path}")
     print(f"  [uploading {pdf_path} to OpenAI…]")
     with pdf_path.open("rb") as f:
-        uploaded = client.files.create(file=f, purpose="user_data")
-    FILE_ID_CACHE.write_text(uploaded.id)
+        uploaded = openai_client().files.create(file=f, purpose="user_data")
+    store_json_artifact(conn, "openai_file_id", {
+        "file_id": uploaded.id,
+        "pdf_path": str(pdf_path),
+        "uploaded_at": datetime.now().isoformat(timespec="seconds"),
+    })
     print(f"  [uploaded, file_id={uploaded.id}]")
     return uploaded.id
 
@@ -49,90 +94,112 @@ def ensure_file_uploaded(pdf_path: Path) -> str:
 # what the ScenicRules benchmark can actually observe and score.
 # ---------------------------------------------------------------------------
 SIMULATION_CONTEXT = """
-ScenicRules benchmark — simulation and evaluation model:
+ScenicRules benchmark — offline trajectory evaluation model:
 
-A sample is one Scenic driving scenario executed in a 2D road-network simulator
-(MetaDrive or the Scenic Newtonian driving simulator). The scenario produces a
-finite discrete rollout of traffic participants over time, which is
-post-processed into a Realization object and evaluated offline.
+This is an OFFLINE rulebook benchmark. Rules inspect a completed, pre-recorded
+trajectory — they do not control the ego vehicle and do not run during planning.
+A scenario produces a finite discrete sequence of world states (timesteps). Each
+rule is evaluated once per timestep and returns a numeric score.
 
-Map / world:
-  • Known 2D road map with drivable area, lane polygons, lane centerlines,
-    lane orientation, lane connectivity, lane maneuvers, intersections, and
-    sometimes lane speed limits.
-  • Scenarios cover lane following, straight driving, left/right turns, lane
-    changes, pedestrian crossings, and some bicycle-passing / near-accident
-    situations.
+Rule function shape:
 
-Objects in scope:
-  • Ego vehicle (the evaluated subject)
-  • Other vehicles (cars, trucks)
-  • Vulnerable road users: pedestrians and bicycles
+    def my_rule(handler, step, ...params):
+        pool = handler(step)
+        ego_state = pool.ego_state
+        # ... inspect state ...
+        return violation_score   # 0.0 if satisfied, positive if violated
 
-Observable state per object per timestep:
-  • 2D position, 2D velocity, orientation/yaw
-  • Polygonal footprint from object dimensions
-  • Object type, stable identity across time
-Derived: acceleration (from Δv), lane occupancy, correct/incorrect-direction
-lane sets, polygon and center distances, polygon intersection (= collision),
-proximity-filtered nearby vehicles/VRUs, ego trajectory linestring, front/rear
-ego path segments, collision timeline.
+The function must return 0 when the rule is satisfied at that step and a
+positive value when violated. Violation magnitude should represent severity.
+A Rule object then aggregates per-step scores over the trajectory using either:
+  • max  — worst single-step violation (use for "did this ever happen?")
+  • sum  — cumulative total (use for repeated infractions or sustained discomfort)
 
-NOT observable / out of scope — do not rely on:
+Available signals via pool = handler(step):
+
+  Ego:
+    pool.ego_state.position          — 2D numpy vector (x, y)
+    pool.ego_state.velocity          — 2D numpy vector
+    pool.ego_state.yaw               — orientation in radians
+    pool.ego_state.polygon           — Shapely polygon footprint
+    pool.ego_state.acceleration      — 2D numpy vector (finite difference of velocity)
+    pool.ego_state.length / .width   — object dimensions
+
+  Other actors:
+    pool.vehicles_in_proximity       — cars/trucks within a radial threshold (PROXIMITY-FILTERED)
+    pool.vrus_in_proximity           — pedestrians/bicycles within a radial threshold (PROXIMITY-FILTERED)
+    pool.other_vehicle_states        — ALL other cars/trucks in the scenario (not filtered)
+    pool.vru_states                  — ALL pedestrians/bicycles in the scenario (not filtered)
+
+  Each actor state has: position, velocity, yaw, polygon, acceleration, length, width,
+  and object_type ("Car", "Truck", "Pedestrian", or "Bicycle").
+
+  Proximity warning: vehicles_in_proximity and vrus_in_proximity are filtered by
+  radial distance + object radii. Use other_vehicle_states or vru_states for rules
+  that must consider all actors regardless of distance.
+
+  Road network (from Scenic):
+    Drivable region polygon(s)
+    Lane polygons, lane centerlines, lane orientations
+    Lane speed limits (when available)
+    Lane maneuvers (allowed next lanes / turn types)
+    Intersection polygons
+    Inferred lane membership for each object state
+    correct_lanes   — lanes whose direction matches ego heading
+    incorrect_lanes — lanes whose direction opposes ego heading
+
+  NOT in the road network — these map features do not exist in the benchmark:
+    • Crosswalk / pedestrian crossing polygons or markers
+    • Stop-line geometry
+    • Yield-line geometry
+    • Bike-lane polygons or markings
+    • Bus-stop or transit-zone polygons
+    • Painted median or exclusion-zone polygons
+    • Sidewalk polygons
+    • Railroad crossing geometry
+    • Posted sign locations or sign state
+    Do not write rules that rely on any of the above. A pedestrian in the
+    scenario is just an actor with a position and velocity — there is no
+    map annotation indicating that it is "in a crosswalk".
+
+  Ego trajectory:
+    Ego trajectory as a Shapely LineString (full realized path)
+    Future trajectory segment (from current step onward)
+    Past trajectory segment (up to current step)
+    Buffered trajectory variants based on ego width
+
+  Geometry and kinematics:
+    Collision = polygon intersection (Shapely)
+    Distance = polygon-to-polygon Shapely distance (0 when touching/overlapping)
+    Acceleration derived from consecutive velocity differences
+    Jerk = ||a(t) − a(t−Δt)|| / Δt; time delta = 0.1 seconds
+
+Time model: discrete 0.1-second steps; no sensor latency, uncertainty, or
+perception error unless encoded separately in the trajectory or map.
+
+NOT available — do not write rules that require:
   • Traffic light or stop sign state
-  • Turn signals, brake lights, horn, eye contact, gestures, human intent
+  • Turn signals, brake lights, horn, eye contact, gestures, driver intent
   • Raw sensor data, occlusion, perception uncertainty, detection confidence
   • Weather, lighting, road surface, visibility
-  • Passenger-comfort signals not inferable from trajectory
   • Legal doctrines or social norms not reducible to map + trajectory
   • Internal policy/network state of the driving agent
   • Fault attribution or what other agents "should have" intended
+  • Continuous-time dynamics beyond finite-difference kinematics and polygon TTC
+  • Any map feature not listed under "Road network" above — in particular:
+    crosswalks, stop lines, bike lanes, sidewalks, safety zones, railroad
+    crossings, bus stops, painted exclusion zones, or posted sign locations
 
-Rule contract: a rule is a function over (realization, timestep) returning 0
-when no violation, a positive scalar otherwise, with larger values for more
-severe violations. Values are aggregated (max/sum) over the rollout. Rules
-must therefore be grounded in geometry, kinematics, lane topology, and
-observable interactions — measurable continuous violation magnitudes, not
-vague preferences.
+Rule-writing guidance:
+  • Prefer rules that produce a continuous numeric violation severity (not binary).
+  • For each rule consider: Which actors are relevant? All or only proximity-filtered?
+    Is it instantaneous, cumulative, or window-based? What threshold defines a
+    violation? Should the trajectory score be max or sum?
+  • Rules about "did this ever happen" → max aggregation.
+  • Rules about "how much total discomfort / how many infractions" → sum aggregation.
+  • Intersections may degrade lane-assignment accuracy; consider relaxing lane-based
+    rules inside intersection polygons.
 """.strip()
-
-
-def init_database():
-    """Initialize SQLite database for caching all pipeline steps."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-
-    # Create cache table for all steps
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS pipeline_cache (
-            step_id TEXT PRIMARY KEY,
-            step_name TEXT NOT NULL,
-            output_json TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # Create table for STL conversions
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS stl_conversions (
-            rule_id TEXT PRIMARY KEY,
-            rule_text TEXT NOT NULL,
-            category TEXT,
-            stl_formula TEXT NOT NULL,
-            value_sum TEXT,
-            notes TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    conn.commit()
-    return conn
-
-
-def _fingerprint(payload):
-    """Stable short hash of any JSON-serializable payload."""
-    blob = json.dumps(payload, sort_keys=True, default=str).encode()
-    return hashlib.sha256(blob).hexdigest()[:12]
 
 
 def cached_api_call(cache_key, fn, fingerprint_payload):
@@ -141,32 +208,19 @@ def cached_api_call(cache_key, fn, fingerprint_payload):
     Any change to the prompt text, schema, or model invalidates the cache
     automatically — no need to manually delete files when prompts evolve.
     """
-    fp = _fingerprint({"model": MODEL, "payload": fingerprint_payload})
-    cache_file = CACHE_DIR / f"{cache_key}.{fp}.json"
-    if cache_file.exists():
-        print(f"  [cache hit: {cache_file.name}]")
-        return json.loads(cache_file.read_text())
-    result = fn()
-    cache_file.write_text(json.dumps(result, indent=2))
-    return result
+    return db_cached_api_call(DB_PATH, MODEL, cache_key, fn, fingerprint_payload)
 
 
-def cache_step_to_db(conn, step_id, step_name, output_data):
-    """Cache pipeline step results to SQLite database."""
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT OR REPLACE INTO pipeline_cache (step_id, step_name, output_json)
-        VALUES (?, ?, ?)
-    """, (step_id, step_name, json.dumps(output_data)))
-    conn.commit()
-
-
-def retrieve_step_from_db(conn, step_id):
-    """Retrieve cached pipeline step from SQLite database."""
-    cursor = conn.cursor()
-    cursor.execute("SELECT output_json FROM pipeline_cache WHERE step_id = ?", (step_id,))
-    row = cursor.fetchone()
-    return json.loads(row[0]) if row else None
+def store_rule_scenario_manifest(conn, manifest: dict) -> None:
+    db_store_rule_scenario_manifest(
+        conn,
+        manifest,
+        SCENIC_RULES_PATH,
+        IMPLEMENTATION_HARNESS,
+        IMPLEMENTATION_PROVIDER,
+        IMPLEMENTATION_MODEL,
+        IMPLEMENTATION_REASONING,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -186,34 +240,41 @@ def step1_extract_rules(file_id: str):
         f"{SIMULATION_CONTEXT}\n\n"
         "Extract a list of driving rules from this California Driver's "
         "Handbook that can realistically be violated — and, crucially, "
-        "evaluated — against a realized ego trajectory in the simulator "
-        "described above. A rule is only useful if it can be computed "
-        "from the observable state listed in the simulation context.\n\n"
+        "evaluated — by a Python function that inspects a completed ego "
+        "trajectory step-by-step using the signals listed in the simulation "
+        "context above. A rule is only useful if every value it needs is "
+        "directly available from those signals.\n\n"
         "Focus on rules about:\n"
         "  • Collision avoidance with vehicles, pedestrians, bicycles\n"
-        "  • Near-collision risk / time-to-collision style clearance\n"
-        "  • Staying inside the drivable region\n"
+        "    (evaluated via polygon intersection)\n"
+        "  • Near-collision risk / time-to-collision with other actors\n"
+        "  • Staying inside the drivable region polygon\n"
         "  • Correct side / correct direction of travel\n"
+        "    (use correct_lanes / incorrect_lanes)\n"
         "  • Lane keeping, lane centering, lane-change execution\n"
         "  • Right-of-way expressible as geometric yielding behavior\n"
+        "    (approach geometry, TTC, gap to conflicting actors)\n"
         "  • Speed limits when lane speed limit is available\n"
         "  • Following distance and lateral clearance (incl. passing\n"
-        "    a bicyclist)\n"
+        "    a bicyclist within the same or adjacent lane)\n"
         "  • Comfort properties inferable from motion (acceleration,\n"
-        "    jerk)\n\n"
-        "Exclude rules whose evaluation would require information the\n"
-        "simulator does not expose — in particular:\n"
-        "  • Traffic light or stop sign state\n"
+        "    jerk, lateral acceleration)\n\n"
+        "Exclude rules whose evaluation would require information not\n"
+        "in the simulation context — in particular:\n"
+        "  • Traffic light, stop sign, or yield sign state\n"
         "  • Turn signals, brake lights, horn, gestures, eye contact,\n"
-        "    driver intent\n"
-        "  • Weather, lighting, visibility, road surface\n"
+        "    driver intent or attention\n"
+        "  • Weather, lighting, visibility, road surface friction\n"
         "  • Licensing, registration, paperwork, DUI, equipment,\n"
         "    inspections, parking, passenger conduct\n"
         "  • Emergency-vehicle rules that depend on lights/sirens\n"
-        "    (keep only the geometric yielding component, if any)\n\n"
-        "Prefer rules that are scenario-agnostic and expressible as a\n"
-        "continuous violation magnitude over a trajectory. Return each\n"
-        "rule as a short, precise statement."
+        "    (keep only the geometric yielding component, if any)\n"
+        "  • Any rule requiring perception, occlusion reasoning, or\n"
+        "    prediction of hidden agents\n\n"
+        "Prefer rules that are scenario-agnostic and produce a continuous\n"
+        "violation magnitude (e.g. clearance shortfall in metres, speed\n"
+        "excess in m/s) rather than a binary pass/fail. Return each rule\n"
+        "as a short, precise statement in the third person."
     )
     schema = {
         "type": "object",
@@ -225,7 +286,7 @@ def step1_extract_rules(file_id: str):
     }
 
     def call():
-        response = client.responses.create(
+        response = openai_client().responses.create(
             model=MODEL,
             input=[{
                 "role": "user",
@@ -292,7 +353,13 @@ def step2_categorize_and_severity(rules):
         "cause or worsen a polygon-intersection event between ego and another "
         "in-scope object; false if the violation is procedural or purely "
         "about trajectory quality (e.g. lane centering with no nearby agent).\n"
-        "4. **rationale** — one sentence explaining the severity rating.\n\n"
+        "4. **aggregation** — how per-step scores should be combined over the "
+        "trajectory: 'max' when the rule captures a worst-case event that only "
+        "needs to occur once (e.g. collision, lane boundary exceedance), or "
+        "'sum' when the rule captures cumulative or repeated infractions "
+        "(e.g. sustained discomfort, repeated weaving, prolonged slow speed).\n"
+        "5. **rationale** — one sentence explaining the severity rating and "
+        "aggregation choice.\n\n"
         f"Rules:\n{json.dumps(rules, indent=2)}"
     )
     schema = {
@@ -307,10 +374,11 @@ def step2_categorize_and_severity(rules):
                         "category": {"type": "string", "enum": CATEGORIES},
                         "severity": {"type": "integer"},
                         "involves_collision": {"type": "boolean"},
+                        "aggregation": {"type": "string", "enum": ["max", "sum"]},
                         "rationale": {"type": "string"},
                     },
                     "required": ["rule", "category", "severity",
-                                 "involves_collision", "rationale"],
+                                 "involves_collision", "aggregation", "rationale"],
                     "additionalProperties": False,
                 },
             }
@@ -320,7 +388,7 @@ def step2_categorize_and_severity(rules):
     }
 
     def call():
-        response = client.responses.create(
+        response = openai_client().responses.create(
             model=MODEL,
             input=[{"role": "user", "content": prompt_text}],
             text={"format": {"type": "json_schema", "name": "categorized_rules",
@@ -379,7 +447,7 @@ def step3_build_hierarchy(categorized_rules):
     )
 
     def call():
-        response = client.responses.create(
+        response = openai_client().responses.create(
             model=MODEL,
             input=[{"role": "user", "content": prompt_text}],
             text={
@@ -509,21 +577,33 @@ def step4_convert_to_stl(categorized_rules, conn):
         "observable signals listed above. Do not invent fields the benchmark\n"
         "does not expose (no traffic-light state, no turn signals, no intent,\n"
         "no weather, no perception confidence).\n\n"
-        "Allowed symbol catalogue (map these to the observable state):\n"
-        "   p_i(t)       — polygonal footprint of object i at time t\n"
-        "   c_i(t)       — 2D center position of object i at time t\n"
-        "   v_i(t)       — 2D velocity of object i at time t\n"
-        "   a_i(t)       — acceleration of object i (derived from Δv)\n"
-        "   θ_i(t)       — orientation/yaw of object i\n"
-        "   type(i)      — object type (vehicle, pedestrian, bicycle)\n"
-        "   R_driv       — drivable-area polygon from the map\n"
-        "   L_k          — lane polygon / centerline / orientation for lane k\n"
-        "   lane(i, t)   — lane occupancy of object i at time t\n"
-        "   v_limit(L_k) — lane speed limit when available\n"
-        "   d_poly(i, j) — polygon-to-polygon distance\n"
-        "   d_cent(i, j) — center-to-center distance\n"
-        "   A, V         — sets of nearby vehicles and VRUs (proximity-filtered)\n"
+        "Symbol catalogue — use ONLY these symbols:\n"
+        "   p_0(t)           — ego polygon footprint (Shapely)\n"
+        "   p_j(t)           — polygon footprint of actor j\n"
+        "   c_0(t), c_j(t)  — 2D center positions\n"
+        "   v_0(t), v_j(t)  — 2D velocity vectors\n"
+        "   a_0(t), a_j(t)  — acceleration vectors (finite diff of v)\n"
+        "   a_long,0(t)      — longitudinal acceleration (along heading)\n"
+        "   a_lat,0(t)       — lateral acceleration (perpendicular to heading)\n"
+        "   jerk_0(t)        — ||a_0(t)−a_0(t−Δt)||/Δt, Δt=0.1 s\n"
+        "   θ_0(t)           — ego yaw (radians)\n"
+        "   type(j)          — 'Car', 'Truck', 'Pedestrian', or 'Bicycle'\n"
+        "   R_driv           — drivable-area polygon from the map\n"
+        "   L_k              — lane polygon / centerline / orientation for lane k\n"
+        "   lane(i,t)        — lane polygon occupied by object i at time t\n"
+        "   correct_lanes(t) — lanes whose direction matches ego heading\n"
+        "   incorrect_lanes(t) — lanes whose direction opposes ego heading\n"
+        "   v_limit(L_k)     — speed limit for lane k (when available)\n"
+        "   d_poly(i,j,t)    — Shapely polygon-to-polygon distance (0 when touching)\n"
+        "   d_cent(i,j,t)    — center-to-center Euclidean distance\n"
+        "   traj_0           — ego trajectory LineString (full realized path)\n"
+        "   traj_future_0(t) — ego trajectory from step t onward\n"
+        "   traj_past_0(t)   — ego trajectory up to step t\n"
+        "   A_prox, V_prox   — proximity-filtered vehicles / VRUs\n"
+        "   A_all, V_all     — ALL other vehicles / ALL VRUs (not filtered)\n"
         "   Object 0 is always the ego vehicle.\n\n"
+        "Use A_all / V_all when a rule must consider every actor in the scene.\n"
+        "Use A_prox / V_prox only when the rule is explicitly local.\n\n"
         "For each rule, provide:\n"
         "1. **stl_formula** — A formal STL specification using:\n"
         "   - G = always/globally operator\n"
@@ -532,14 +612,15 @@ def step4_convert_to_stl(categorized_rules, conn):
         "   - [T_1, T_2] = time interval in seconds\n"
         "   - ∀/∃ = universal/existential quantifiers\n"
         "   - Only symbols from the catalogue above.\n\n"
-        "2. **value_semantics** — A quantitative, non-negative measure of\n"
-        "   violation severity, 0 when satisfied, larger when worse, so that\n"
-        "   max/sum aggregation over the rollout is meaningful:\n"
-        "   - For collision: kinetic energy loss (Joules)\n"
-        "   - For boundary/lane: distance from valid region (meters)\n"
-        "   - For clearance/TTC: shortfall below threshold (meters or seconds)\n"
-        "   - For speed/comfort: excess over limit (m/s, m/s², m/s³)\n"
-        "   - Formulated as a mathematical expression over the catalogue.\n\n"
+        "2. **value_semantics** — A quantitative, non-negative per-step measure\n"
+        "   of violation severity (0 when satisfied, larger when worse):\n"
+        "   - Collision: kinetic energy loss in Joules (½mΔv²)\n"
+        "   - Boundary/lane: area of ego polygon outside valid region (m²)\n"
+        "     or signed distance from valid region (m)\n"
+        "   - Clearance/TTC: shortfall below threshold (meters or seconds)\n"
+        "   - Speed/comfort: excess over limit (m/s, m/s², or m/s³)\n"
+        "   State whether the trajectory score should be max or sum of\n"
+        "   per-step values, consistent with the aggregation field.\n\n"
         "Examples provided:\n"
         "Example 1: No collisions with VRUs\n"
         f"  STL: {STL_EXAMPLES['no_collisions_vru']['stl_formula']}\n"
@@ -554,7 +635,7 @@ def step4_convert_to_stl(categorized_rules, conn):
     )
 
     def call():
-        response = client.responses.create(
+        response = openai_client().responses.create(
             model=MODEL,
             input=[{"role": "user", "content": prompt_text}],
             text={
@@ -617,6 +698,372 @@ def step4_convert_to_stl(categorized_rules, conn):
     conn.commit()
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Step 5 — Implement each rule in ScenicRules on its own branch via Claude Code
+# ---------------------------------------------------------------------------
+
+def _rule_slug(text: str, max_len: int = 35) -> str:
+    """Lowercase underscore slug from rule text, skipping stop-words."""
+    stop = {
+        "the", "driver", "does", "not", "a", "an", "or", "and", "when",
+        "is", "in", "to", "of", "that", "with", "without", "for", "on",
+        "if", "by", "at", "from", "into", "it", "its", "are", "be", "been",
+        "so", "do", "no", "any", "too",
+    }
+    words = re.sub(r"[^a-z0-9\s]", "", text.lower()).split()
+    words = [w for w in words if w not in stop]
+    return "_".join(words)[:max_len].rstrip("_")
+
+
+def _invoke_deepseek_code(
+    prompt: str,
+    cwd: Path = SCENIC_RULES_PATH,
+    log_prefix: str = "         ",
+) -> tuple[bool, str]:
+    """
+    Run Pi with DeepSeek in the ScenicRules repo working directory.
+    The coding agent reads the real codebase and writes files itself.
+    Returns (success, output_text).
+    """
+    if not os.environ.get("DEEPSEEK_API_KEY"):
+        raise RuntimeError("DEEPSEEK_API_KEY is required for rule implementation.")
+    if not PI_STREAM_EXTENSION_PATH.exists():
+        raise RuntimeError(f"Pi stream-output extension not found at {PI_STREAM_EXTENSION_PATH}")
+
+    command = [
+        "pi",
+        "--provider",
+        IMPLEMENTATION_PROVIDER,
+        "--model",
+        IMPLEMENTATION_MODEL,
+        "--thinking",
+        IMPLEMENTATION_REASONING,
+        "--extension",
+        str(PI_STREAM_EXTENSION_PATH.resolve()),
+        "--stream=all",
+        "--print",
+        "--no-session",
+        "--tools",
+        "read,bash,edit,write,grep,find,ls",
+        "--verbose",
+        prompt,
+    ]
+
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    output_lines = []
+    print(
+        f"{log_prefix}[pi] provider={IMPLEMENTATION_PROVIDER} "
+        f"model={IMPLEMENTATION_MODEL} reasoning={IMPLEMENTATION_REASONING}"
+    )
+    try:
+        assert process.stdout is not None
+        for raw_line in process.stdout:
+            line = raw_line.rstrip()
+            if not line:
+                continue
+            output_lines.append(line)
+            print(f"{log_prefix}  [pi] {line}")
+    except KeyboardInterrupt:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        raise
+
+    return_code = process.wait()
+    return return_code == 0, "\n".join(output_lines)
+
+
+def _branch_has_commits_ahead_of_main(branch_name: str) -> bool:
+    """True if branch exists and has at least one commit not on main."""
+    if not _branch_exists(branch_name):
+        return False
+    repo = Repo(SCENIC_RULES_PATH)
+    try:
+        count = repo.git.rev_list("--count", f"main..{branch_name}")
+    except GitCommandError:
+        return False
+    return count.strip() not in ("", "0")
+
+
+def _branch_exists(branch_name: str) -> bool:
+    """True if a local branch exists."""
+    repo = Repo(SCENIC_RULES_PATH)
+    return any(head.name == branch_name for head in repo.heads)
+
+
+def _scenario_name_for_rule(rule_id: int) -> str:
+    """Stable scenario name for a generated rule id."""
+    return f"generated_rule_{rule_id}"
+
+
+def _scenario_path_for_name(scenario_name: str) -> str:
+    """Repo-relative path for a generated rule scenario."""
+    return f"scenarios/generated/{scenario_name}.scenic"
+
+
+def _write_rule_scenario_manifest(entries: list[dict], conn=None) -> None:
+    """Persist a machine-readable branch-to-scenario manifest in SQLite."""
+    manifest = {
+        "scenic_rules_repo": str(SCENIC_RULES_PATH),
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "implementation_harness": IMPLEMENTATION_HARNESS,
+        "implementation_provider": IMPLEMENTATION_PROVIDER,
+        "implementation_model": IMPLEMENTATION_MODEL,
+        "implementation_reasoning": IMPLEMENTATION_REASONING,
+        "entries": entries,
+    }
+    if conn is not None:
+        store_rule_scenario_manifest(conn, manifest)
+
+
+def _branch_has_active_registration(branch_name: str, rule_id: int) -> bool:
+    """True when the branch contains both implementation and active registration."""
+    if not _branch_has_commits_ahead_of_main(branch_name):
+        return False
+
+    scenario_path = _scenario_path_for_name(_scenario_name_for_rule(rule_id))
+    checks = [
+        ("grep", "-q", f"rule_{rule_id}", f"{branch_name}:src/evaluation/run_evaluation.py"),
+        ("grep", "-q", f"^{rule_id}$", f"{branch_name}:src/evaluation/assets/with_vru.graph"),
+        ("cat_file", "-e", f"{branch_name}:{scenario_path}"),
+    ]
+    repo = Repo(SCENIC_RULES_PATH)
+    for command, *args in checks:
+        try:
+            getattr(repo.git, command)(*args)
+        except GitCommandError:
+            return False
+    return True
+
+
+def _build_implementation_prompt(
+    *,
+    idx: int,
+    rule: dict,
+    rule_id: int,
+    slug: str,
+    scenario_name: str,
+    scenario_path: str,
+    stl_info: dict,
+) -> str:
+    rule_text = rule["rule"]
+    category = rule["category"]
+    aggregation = rule["aggregation"]
+    severity = rule["severity"]
+    stl_formula = stl_info.get("stl_formula", "N/A")
+    value_semantics = stl_info.get("value_semantics", "N/A")
+    return (
+        "You are working in the ScenicRules benchmark repository. Implement only "
+        "this one generated rule and make no unrelated changes.\n\n"
+        "First read src/rulebook_benchmark/rule_functions.py, "
+        "src/evaluation/run_evaluation.py, src/evaluation/cfgs/eval.yaml, the active "
+        "graph file under src/evaluation/assets/, and at least one scenario under "
+        "scenarios/common/.\n\n"
+        f"Create or update src/rulebook_benchmark/generated/rule_{idx:03d}_{slug}.py "
+        "and src/rulebook_benchmark/generated/__init__.py.\n\n"
+        f"Rule text: {rule_text}\n"
+        f"Category: {category}\n"
+        f"Severity: {severity}/5\n"
+        f"Aggregation: {aggregation}\n"
+        f"STL formula: {stl_formula}\n"
+        f"Value semantics: {value_semantics}\n"
+        f"Rule ID: {rule_id}\n\n"
+        "The generated Python file must define one rule function with signature "
+        "(handler, step, **params). It must return 0.0 when satisfied and a positive "
+        "float when violated. Define a Rule object named "
+        f"rule_{rule_id} = Rule(fn, {aggregation}, 'generated_{idx:03d}_{slug}', "
+        f"{rule_id}, **params). Use the existing Rule API and helper style.\n\n"
+        "Register the generated rule so it is active immediately: import it in "
+        "src/evaluation/run_evaluation.py, add it to ruleset, add it to "
+        "rule_id_to_rule, and update the active graph file so the #rules section "
+        f"includes {rule_id}. Add acyclic lowest-priority edges by connecting current "
+        f"terminal graph nodes to {rule_id}. For non-VRU rules, also update "
+        "no_vru.graph if appropriate.\n\n"
+        f"Create a targeted Scenic scenario at {scenario_path} with scenario name "
+        f"{scenario_name}. The scenario should exercise this exact rule with a clear "
+        "violating behavior and minimal unrelated traffic. Include "
+        "`from rulebook_benchmark import bench` and `require monitor bench.bench()`.\n\n"
+        "Scenic authoring requirements:\n"
+        "  - Follow scenarios/common/*.scenic conventions for map/model params, "
+        "behaviors, objects, and records.\n"
+        "  - Use an existing map path that works from scenarios/generated/, usually "
+        "`param map = localPath('../../maps/Town05.xodr')`.\n"
+        "  - Do not rely on traffic lights, stop signs, yield signs, crosswalks, "
+        "turn signals, sidewalks, or map features not exposed by the benchmark.\n"
+        "  - Keep the scene deterministic or lightly parameterized with require "
+        "constraints that avoid fragile rejection sampling.\n"
+        "  - Make reaching_goal work: define a real ego goal condition and record it "
+        "as `egoReachedGoal`. Do not leave egoReachedGoal always False.\n"
+        "  - Record useful geometry: ego polygon, ego lane polygon where available, "
+        "and relevant actor polygons/lane polygons.\n\n"
+        "Before finishing, run "
+        f"`python3 -m py_compile src/evaluation/run_evaluation.py "
+        f"src/rulebook_benchmark/generated/rule_{idx:03d}_{slug}.py` and fix errors. "
+        "If a one-sample evaluation is feasible, run it against the generated scenario "
+        "and fix syntax/import failures."
+    )
+
+
+def step5_implement_rules(
+    categorized_rules: list,
+    stl_conversions: dict,
+    conn,
+) -> list:
+    """
+    For each categorized rule, create a git branch in the ScenicRules repo and
+    invoke Pi with DeepSeek to implement the rule by reading the real
+    codebase and writing the implementation file directly.
+
+    Caching: a branch that already has commits ahead of main is skipped.
+    """
+    stl_by_rule = {c["rule"]: c for c in stl_conversions.get("conversions", [])}
+    n = len(categorized_rules)
+    results = []
+    implemented_count = 0
+    skipped_count = 0
+
+    print(f"\n  Target repo   : {SCENIC_RULES_PATH}")
+    print(f"  Rules to impl : {n}")
+    print(f"  OpenAI model  : {MODEL}")
+    print(f"  Impl harness  : {IMPLEMENTATION_HARNESS}")
+    print(f"  Impl provider : {IMPLEMENTATION_PROVIDER}")
+    print(f"  Impl model    : {IMPLEMENTATION_MODEL}")
+    print(f"  Reasoning     : {IMPLEMENTATION_REASONING}")
+    print()
+    scenic_repo = Repo(SCENIC_RULES_PATH)
+
+    for idx, rule in enumerate(categorized_rules):
+        rule_text = rule["rule"]
+        category = rule["category"]
+        aggregation = rule["aggregation"]
+        severity = rule["severity"]
+        rule_id = RULE_ID_OFFSET + idx
+        slug = _rule_slug(rule_text)
+        branch_name = f"rule/{idx:03d}-{category}-{slug}"[:80]
+        scenario_name = _scenario_name_for_rule(rule_id)
+        scenario_path = _scenario_path_for_name(scenario_name)
+
+        display = rule_text[:70] + "…" if len(rule_text) > 70 else rule_text
+        print(f"  [{idx + 1:>2}/{n}] {display}")
+        print(f"         category={category}  severity={severity}/5  aggregation={aggregation}")
+
+        # Cache only if the branch has both the generated file and active-rule wiring.
+        if _branch_has_active_registration(branch_name, rule_id):
+            print(f"         [cache hit — active branch exists] {branch_name}")
+            results.append({
+                "rule": rule_text, "category": category,
+                "branch": branch_name,
+                "scenario_name": scenario_name,
+                "scenario_path": scenario_path,
+                "status": "cached",
+            })
+            skipped_count += 1
+            _write_rule_scenario_manifest(results, conn)
+            continue
+
+        # Create a new branch, or reuse an existing failed/generated-only branch.
+        try:
+            scenic_repo.git.checkout("main")
+            if _branch_exists(branch_name):
+                scenic_repo.git.checkout(branch_name)
+                print(f"         [retrying existing incomplete branch] {branch_name}")
+            else:
+                scenic_repo.git.checkout("-b", branch_name)
+        except GitCommandError as exc:
+            err = exc.stderr or str(exc)
+            print(f"         [ERROR preparing branch: {err}]")
+            results.append({
+                "rule": rule_text, "category": category,
+                "branch": branch_name,
+                "scenario_name": scenario_name,
+                "scenario_path": scenario_path,
+                "status": "error",
+            })
+            _write_rule_scenario_manifest(results, conn)
+            continue
+
+        prompt = _build_implementation_prompt(
+            idx=idx,
+            rule=rule,
+            rule_id=rule_id,
+            slug=slug,
+            scenario_name=scenario_name,
+            scenario_path=scenario_path,
+            stl_info=stl_by_rule.get(rule_text, {}),
+        )
+
+        print("         [invoking Pi/DeepSeek …]")
+        success, _ = _invoke_deepseek_code(prompt)
+
+        if not success:
+            print("         [ERROR: Pi/DeepSeek exited non-zero]")
+            scenic_repo.git.checkout("main")
+            results.append({
+                "rule": rule_text, "category": category,
+                "branch": branch_name,
+                "scenario_name": scenario_name,
+                "scenario_path": scenario_path,
+                "status": "error",
+            })
+            _write_rule_scenario_manifest(results, conn)
+            continue
+
+        # Commit whatever Claude Code created and the active-rule registration.
+        scenic_repo.git.add(
+            "src/rulebook_benchmark/generated/",
+            "scenarios/generated/",
+            "src/evaluation/run_evaluation.py",
+            "src/evaluation/assets/with_vru.graph",
+            "src/evaluation/assets/no_vru.graph",
+        )
+        commit_msg = (
+            f"rule({category}): implement rule_{idx:03d}_{slug}\n\n"
+            f"Severity {severity}/5, aggregation={aggregation}\n"
+            f"Rule: {rule_text[:120]}\n"
+            f"Scenario: {scenario_name} ({scenario_path})"
+        )
+        try:
+            scenic_repo.git.commit("-m", commit_msg)
+        except GitCommandError as exc:
+            err = exc.stderr or str(exc)
+            print(f"         [WARNING: nothing to commit — {err}]")
+            status = "empty"
+        else:
+            print(f"         [committed] branch={branch_name}")
+            status = "committed"
+            implemented_count += 1
+
+        scenic_repo.git.checkout("main")
+        results.append({
+            "rule": rule_text, "category": category,
+            "branch": branch_name,
+            "scenario_name": scenario_name,
+            "scenario_path": scenario_path,
+            "status": status,
+        })
+        _write_rule_scenario_manifest(results, conn)
+
+    print()
+    print(f"  Implemented (new branches) : {implemented_count}")
+    print(f"  Skipped (already cached)   : {skipped_count}")
+    print(f"  Total                      : {n}")
+
+    _write_rule_scenario_manifest(results, conn)
+    print("  Scenario manifest          : SQLite rule_scenario_manifest")
+
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -694,56 +1141,67 @@ def print_summary(extracted_rules, categorized, hierarchy, stl_conversions=None)
 # ---------------------------------------------------------------------------
 def main():
     print("=" * 70)
-    print("  Rulebook Generator — Proof-of-Concept Pipeline")
+    print("  Rulebook Generator — Pipeline")
     print("=" * 70)
 
     # Initialize SQLite database
-    conn = init_database()
+    conn = init_database(DB_PATH)
     print("\n✓ Database initialized at", DB_PATH)
 
-    print("\n[0/4] Ensuring handbook PDF is uploaded …")
-    file_id = ensure_file_uploaded(PDF_PATH)
+    print("\n[0/5] Ensuring handbook PDF is uploaded …")
+    file_id = ensure_file_uploaded(PDF_PATH, conn)
 
-    print("\n[1/4] Extracting simulation-relevant rules from PDF …")
+    print("\n[1/5] Extracting simulation-relevant rules from PDF …")
     extracted = step1_extract_rules(file_id)
     rules = extracted["rules"]
     cache_step_to_db(conn, "step1_extract_rules", "Extract Rules", extracted)
     print(f"  → {len(rules)} rules extracted")
 
-    print("\n[2/4] Categorizing rules and assessing severity …")
+    print("\n[2/5] Categorizing rules and assessing severity …")
     categorized = step2_categorize_and_severity(rules)
     cat_rules = categorized["rules"]
     cache_step_to_db(conn, "step2_categorize_severity", "Categorize & Severity", categorized)
     collision_count = sum(1 for r in cat_rules if r["involves_collision"])
     print(f"  → {len(cat_rules)} rules categorized, {collision_count} collision-involved")
 
-    print("\n[3/4] Building priority hierarchy …")
+    print("\n[3/5] Building priority hierarchy …")
     hierarchy = step3_build_hierarchy(cat_rules)
     cache_step_to_db(conn, "step3_build_hierarchy", "Build Hierarchy", hierarchy)
     print(f"  → {len(hierarchy['tiers'])} tiers, "
           f"{len(hierarchy['collision_severity_ordering'])} collision types, "
           f"{len(hierarchy['pairwise_priority_edges'])} pairwise edges")
 
-    print("\n[4/4] Converting rules to Signal Temporal Logic (STL) …")
+    print("\n[4/5] Converting rules to Signal Temporal Logic (STL) …")
     stl_conversions = step4_convert_to_stl(cat_rules, conn)
     cache_step_to_db(conn, "step4_stl_conversions", "STL Conversions", stl_conversions)
     stl_count = len(stl_conversions.get("conversions", []))
     print(f"  → {stl_count} rules converted to STL formulas")
 
+    print("\n[5/5] Implementing rules as Python code in ScenicRules …")
+    impl_results = step5_implement_rules(cat_rules, stl_conversions, conn)
+    cache_step_to_db(conn, "step5_implement_rules", "Implement Rules", impl_results)
+    committed = sum(1 for r in impl_results if r["status"] == "committed")
+    cached = sum(1 for r in impl_results if r["status"] == "cached")
+    print(f"  → {committed} branches created, {cached} already active")
+
     print_summary(rules, categorized, hierarchy, stl_conversions)
 
-    output_path = Path("rulebook_output.json")
     full_output = {
         "metadata": {
             "source": "California Driver's Handbook",
             "model": MODEL,
             "timestamp": datetime.now().isoformat(),
             "database_path": str(DB_PATH),
+            "implementation_harness": IMPLEMENTATION_HARNESS,
+            "implementation_provider": IMPLEMENTATION_PROVIDER,
+            "implementation_model": IMPLEMENTATION_MODEL,
+            "implementation_reasoning": IMPLEMENTATION_REASONING,
             "pipeline_steps": [
                 "extract_rules",
                 "categorize_and_severity",
                 "build_hierarchy",
                 "convert_to_stl",
+                "implement_rules",
             ],
         },
         "extracted_rules": rules,
@@ -751,10 +1209,13 @@ def main():
         "hierarchy": hierarchy,
         "stl_conversions": stl_conversions,
         "stl_examples": STL_EXAMPLES,
+        "implemented_rules": impl_results,
+        "rule_scenario_manifest": {
+            "entries": impl_results,
+        },
     }
-    output_path.write_text(json.dumps(full_output, indent=2))
-    print(f"\n✓ Full structured output saved to {output_path}")
-    print(f"✓ All pipeline steps cached to {DB_PATH}")
+    store_json_artifact(conn, "rulebook_output", full_output)
+    print(f"\n✓ Full structured output stored in {DB_PATH}")
 
     # Display example STL formulas
     print_section("STL EXAMPLE FORMULAS")
