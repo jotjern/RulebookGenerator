@@ -1,0 +1,218 @@
+#!/usr/bin/env python3
+"""Page through generated rule scoring-function diffs.
+
+For each agent workspace, this extracts only the function passed to the generated
+Rule(...) object and shows a colorized unified diff against the selected base ref.
+Press Enter to advance, or type q and Enter to quit.
+"""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import difflib
+import os
+import subprocess
+import sys
+import warnings
+from pathlib import Path
+
+
+GREEN = "\033[32m"
+RED = "\033[31m"
+CYAN = "\033[36m"
+BOLD = "\033[1m"
+RESET = "\033[0m"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Show only generated rule scoring-function diffs, one rule at a time."
+    )
+    parser.add_argument(
+        "--workspace-root",
+        type=Path,
+        default=Path(".rulegen_agent_workspaces"),
+        help="Directory containing per-rule agent workspaces.",
+    )
+    parser.add_argument(
+        "--base",
+        default="origin/main",
+        help="Git ref to compare against inside each workspace repo.",
+    )
+    parser.add_argument(
+        "--color",
+        choices=("auto", "always", "never"),
+        default="auto",
+        help="When to emit ANSI colors.",
+    )
+    parser.add_argument(
+        "--no-pause",
+        action="store_true",
+        help="Print all diffs without waiting for Enter between rules.",
+    )
+    return parser.parse_args()
+
+
+def color_enabled(mode: str) -> bool:
+    if mode == "always":
+        return True
+    if mode == "never":
+        return False
+    return sys.stdout.isatty()
+
+
+def paint(line: str, enabled: bool) -> str:
+    if not enabled:
+        return line
+    if line.startswith("+") and not line.startswith("+++"):
+        return f"{GREEN}{line}{RESET}"
+    if line.startswith("-") and not line.startswith("---"):
+        return f"{RED}{line}{RESET}"
+    if line.startswith("@@"):
+        return f"{CYAN}{line}{RESET}"
+    if line.startswith(("---", "+++")):
+        return f"{BOLD}{line}{RESET}"
+    return line
+
+
+def git_show(repo: Path, ref: str, rel_path: str) -> str | None:
+    result = subprocess.run(
+        ["git", "-C", str(repo), "show", f"{ref}:{rel_path}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def rule_function_name(tree: ast.Module) -> str | None:
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        call = node.value
+        if not isinstance(call, ast.Call):
+            continue
+        func = call.func
+        is_rule_call = (
+            isinstance(func, ast.Name)
+            and func.id == "Rule"
+            or isinstance(func, ast.Attribute)
+            and func.attr == "Rule"
+        )
+        if not is_rule_call or not call.args:
+            continue
+        first_arg = call.args[0]
+        if isinstance(first_arg, ast.Name):
+            return first_arg.id
+    return None
+
+
+def extract_function(source: str, preferred_name: str | None = None) -> tuple[str, str] | None:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(source)
+    except SyntaxError:
+        return None
+
+    name = preferred_name or rule_function_name(tree)
+    candidates = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
+    if name:
+        candidates = [node for node in candidates if node.name == name]
+    if not candidates:
+        return None
+
+    node = candidates[0]
+    lines = source.splitlines()
+    start = node.lineno - 1
+    end = node.end_lineno or node.lineno
+    return node.name, "\n".join(lines[start:end]) + "\n"
+
+
+def generated_files(workspace_root: Path) -> list[Path]:
+    files = workspace_root.glob(
+        "*/repo/src/rulebook_benchmark/generated/rule_*.py"
+    )
+    return sorted(
+        (path for path in files if path.name != "__init__.py"),
+        key=lambda path: path.parts,
+    )
+
+
+def workspace_label(path: Path, workspace_root: Path) -> str:
+    try:
+        return path.relative_to(workspace_root).parts[0]
+    except ValueError:
+        return path.parent.name
+
+
+def repo_root_for(path: Path) -> Path:
+    for parent in path.parents:
+        if parent.name == "repo":
+            return parent
+    raise ValueError(f"Could not find workspace repo root for {path}")
+
+
+def main() -> int:
+    args = parse_args()
+    use_color = color_enabled(args.color)
+    files = generated_files(args.workspace_root)
+    if not files:
+        print(f"No generated rule files found under {args.workspace_root}", file=sys.stderr)
+        return 1
+
+    for idx, path in enumerate(files, start=1):
+        repo = repo_root_for(path)
+        rel_path = path.relative_to(repo).as_posix()
+        current_source = path.read_text()
+        current_func = extract_function(current_source)
+        if current_func is None:
+            print(f"[{idx}/{len(files)}] {path}: could not extract generated function")
+            continue
+
+        func_name, current_text = current_func
+        base_source = git_show(repo, args.base, rel_path)
+        base_text = ""
+        if base_source is not None:
+            base_func = extract_function(base_source, preferred_name=func_name)
+            if base_func is not None:
+                base_text = base_func[1]
+
+        old_name = f"{args.base}:{rel_path}::{func_name}"
+        new_name = f"{workspace_label(path, args.workspace_root)}::{func_name}"
+        diff = difflib.unified_diff(
+            base_text.splitlines(),
+            current_text.splitlines(),
+            fromfile=old_name,
+            tofile=new_name,
+            lineterm="",
+        )
+
+        if not args.no_pause and sys.stdout.isatty():
+            os.system("clear")
+        print(f"[{idx}/{len(files)}] {new_name}")
+        print(f"{path}\n")
+        printed = False
+        for line in diff:
+            printed = True
+            print(paint(line, use_color))
+        if not printed:
+            print("(no function diff)")
+
+        if args.no_pause or idx == len(files):
+            continue
+        try:
+            response = input("\nPress Enter for next diff, or q then Enter to quit: ")
+        except EOFError:
+            break
+        if response.lower().startswith("q"):
+            break
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

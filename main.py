@@ -1,7 +1,11 @@
+import argparse
+import concurrent.futures
 import os
 import re
 import json
+import shutil
 import subprocess
+import threading
 from pathlib import Path
 from collections import Counter
 from datetime import datetime
@@ -50,9 +54,14 @@ def openai_client() -> openai.Client:
 MODEL = "gpt-5.4"
 IMPLEMENTATION_HARNESS = "pi"
 IMPLEMENTATION_PROVIDER = "deepseek"
-IMPLEMENTATION_MODEL = "deepseek-v4-pro"
-IMPLEMENTATION_REASONING = "xhigh"
+IMPLEMENTATION_MODEL = "deepseek-v4-flash"
+IMPLEMENTATION_REASONING = "high"
 PI_STREAM_EXTENSION_PATH = Path(".pi/extensions/stream-output/index.ts")
+AGENT_DOCKER_IMAGE = "rulebook-generator-agents:latest"
+AGENT_DOCKERFILE = Path("Dockerfile.rulebook-agents")
+AGENT_WORKSPACE_ROOT = Path(".rulegen_agent_workspaces")
+AGENT_DOCKER_CTX = Path(".rulegen-docker-ctx")
+AGENT_LOG_DIR = Path("agent_logs")
 PDF_PATH = Path("california-drivers-handbook.pdf")
 DB_PATH = Path("rulebook_pipeline.db")
 SCENIC_RULES_PATH = Path("/Users/jogramnaestjernshaugen/ScenicRules")
@@ -717,22 +726,115 @@ def _rule_slug(text: str, max_len: int = 35) -> str:
     return "_".join(words)[:max_len].rstrip("_")
 
 
-def _invoke_deepseek_code(
+def _docker_env_args() -> list[str]:
+    if not os.environ.get("DEEPSEEK_API_KEY"):
+        raise RuntimeError("DEEPSEEK_API_KEY is required for rule implementation.")
+    return [
+        "-e", "DEEPSEEK_API_KEY",
+        "-e", "FORCE_COLOR=1",
+        "-e", "TERM=xterm-256color",
+    ]
+
+
+def _ensure_agent_docker_image() -> None:
+    """Build the Docker image used by implementation workers when needed."""
+    if not AGENT_DOCKERFILE.exists():
+        raise RuntimeError(f"Missing {AGENT_DOCKERFILE}; cannot run Docker isolation.")
+    if not SCENIC_RULES_PATH.exists():
+        raise RuntimeError(
+            f"ScenicRules repo not found at {SCENIC_RULES_PATH}; "
+            "update SCENIC_RULES_PATH in main.py."
+        )
+    inspect = subprocess.run(
+        ["docker", "image", "inspect", AGENT_DOCKER_IMAGE],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if inspect.returncode == 0:
+        return
+
+    # Prepare a fixed, inspectable build context directory.
+    ctx = AGENT_DOCKER_CTX
+    ctx.mkdir(parents=True, exist_ok=True)
+
+    shutil.copy2(AGENT_DOCKERFILE, ctx / AGENT_DOCKERFILE.name)
+
+    (ctx / "docker").mkdir(parents=True, exist_ok=True)
+    for docker_file in Path("docker").iterdir():
+        if docker_file.is_file():
+            shutil.copy2(docker_file, ctx / "docker" / docker_file.name)
+
+    scenicrules_dst = ctx / "scenicrules"
+    if scenicrules_dst.exists():
+        shutil.rmtree(scenicrules_dst)
+    print(f"  [docker] syncing {SCENIC_RULES_PATH} → {scenicrules_dst}", flush=True)
+    shutil.copytree(
+        SCENIC_RULES_PATH,
+        scenicrules_dst,
+        ignore=shutil.ignore_patterns(
+            ".git",
+            ".venv",
+            "__pycache__",
+            ".pytest_cache",
+            ".mypy_cache",
+            "dist",
+            "build",
+            ".DS_Store",
+        ),
+    )
+    print(
+        f"  [docker] building {AGENT_DOCKER_IMAGE} "
+        f"from context {ctx.resolve()}",
+        flush=True,
+    )
+    result = subprocess.run(
+        [
+            "docker", "build",
+            "-f", AGENT_DOCKERFILE.name,
+            "-t", AGENT_DOCKER_IMAGE,
+            ".",
+        ],
+        cwd=ctx,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"docker build failed (exit {result.returncode}); "
+            f"inspect context at {ctx.resolve()}"
+        )
+
+
+def _invoke_deepseek_code_in_docker(
     prompt: str,
-    cwd: Path = SCENIC_RULES_PATH,
+    workspace_repo: Path,
+    log_path: Path,
     log_prefix: str = "         ",
 ) -> tuple[bool, str]:
     """
-    Run Pi with DeepSeek in the ScenicRules repo working directory.
-    The coding agent reads the real codebase and writes files itself.
+    Run Pi with DeepSeek inside Docker, with only one clone mounted read/write.
     Returns (success, output_text).
     """
-    if not os.environ.get("DEEPSEEK_API_KEY"):
-        raise RuntimeError("DEEPSEEK_API_KEY is required for rule implementation.")
     if not PI_STREAM_EXTENSION_PATH.exists():
         raise RuntimeError(f"Pi stream-output extension not found at {PI_STREAM_EXTENSION_PATH}")
 
+    project_root = Path.cwd().resolve()
     command = [
+        "docker",
+        "run",
+        "--rm",
+        "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges",
+        "--pids-limit", "256",
+        "-v", f"{workspace_repo.resolve()}:/workspace:rw",
+        "-v", f"{project_root.resolve()}:/rulebookgen:ro",
+        "-w", "/workspace",
+        "-e", "PI_CODING_AGENT_DIR=/tmp/pi-agent",
+        "-e", "GIT_CONFIG_COUNT=1",
+        "-e", "GIT_CONFIG_KEY_0=safe.directory",
+        "-e", "GIT_CONFIG_VALUE_0=/workspace",
+        *_docker_env_args(),
+        AGENT_DOCKER_IMAGE,
         "pi",
         "--provider",
         IMPLEMENTATION_PROVIDER,
@@ -741,7 +843,7 @@ def _invoke_deepseek_code(
         "--thinking",
         IMPLEMENTATION_REASONING,
         "--extension",
-        str(PI_STREAM_EXTENSION_PATH.resolve()),
+        "/rulebookgen/.pi/extensions/stream-output/index.ts",
         "--stream=all",
         "--print",
         "--no-session",
@@ -753,25 +855,31 @@ def _invoke_deepseek_code(
 
     process = subprocess.Popen(
         command,
-        cwd=cwd,
+        cwd=project_root,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
     )
     output_lines = []
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a") as log_file:
+        log_file.write("\n[command] " + " ".join(command[:-1]) + " <prompt omitted>\n\n")
     print(
-        f"{log_prefix}[pi] provider={IMPLEMENTATION_PROVIDER} "
+        f"{log_prefix}[docker/pi] provider={IMPLEMENTATION_PROVIDER} "
         f"model={IMPLEMENTATION_MODEL} reasoning={IMPLEMENTATION_REASONING}"
     )
     try:
         assert process.stdout is not None
-        for raw_line in process.stdout:
-            line = raw_line.rstrip()
-            if not line:
-                continue
-            output_lines.append(line)
-            print(f"{log_prefix}  [pi] {line}")
+        with log_path.open("a") as log_file:
+            for raw_line in process.stdout:
+                log_file.write(raw_line)
+                log_file.flush()
+                line = raw_line.rstrip()
+                if not line:
+                    continue
+                output_lines.append(line)
+                print(f"{log_prefix}  [pi] {line}")
     except KeyboardInterrupt:
         process.terminate()
         try:
@@ -782,6 +890,8 @@ def _invoke_deepseek_code(
         raise
 
     return_code = process.wait()
+    with log_path.open("a") as log_file:
+        log_file.write(f"\n[exit_code] {return_code}\n")
     return return_code == 0, "\n".join(output_lines)
 
 
@@ -803,16 +913,57 @@ def _branch_exists(branch_name: str) -> bool:
     return any(head.name == branch_name for head in repo.heads)
 
 
-def _scenario_name_for_rule(rule_id: int) -> str:
-    """Stable scenario name for a generated rule id."""
-    return f"generated_rule_{rule_id}"
+def _prepare_rule_workspace(workspace_repo: Path, branch_name: str) -> tuple[bool, str]:
+    """Create a fresh clone for one implementation worker."""
+    if workspace_repo.exists():
+        shutil.rmtree(workspace_repo)
+    workspace_repo.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        repo = Repo.clone_from(str(SCENIC_RULES_PATH), str(workspace_repo))
+        repo.git.fetch("origin", "refs/heads/*:refs/remotes/origin/*")
+        start_point = f"origin/{branch_name}" if _branch_exists(branch_name) else "origin/main"
+        repo.git.checkout("-B", branch_name, start_point)
+        return True, ""
+    except GitCommandError as exc:
+        return False, (exc.stderr or str(exc)).strip()
 
 
-def _scenario_path_for_name(scenario_name: str) -> str:
-    """Repo-relative path for a generated rule scenario."""
-    return f"scenarios/generated/{scenario_name}.scenic"
+def _fetch_workspace_branch_into_repo(workspace_repo: Path, branch_name: str) -> None:
+    """Copy the worker branch from its clone back into the ScenicRules repo."""
+    repo = Repo(SCENIC_RULES_PATH)
+    repo.git.fetch(
+        "--force",
+        str(workspace_repo.resolve()),
+        f"{branch_name}:refs/heads/{branch_name}",
+    )
 
 
+def _commit_rule_workspace(
+    workspace_repo: Path,
+    category: str,
+    idx: int,
+    slug: str,
+    severity: int,
+    aggregation: str,
+    rule_text: str,
+) -> str:
+    repo = Repo(workspace_repo)
+    repo.git.add(
+        "src/rulebook_benchmark/generated/",
+        "src/evaluation/run_evaluation.py",
+        "src/evaluation/assets/with_vru.graph",
+        "src/evaluation/assets/no_vru.graph",
+    )
+    commit_msg = (
+        f"rule({category}): implement rule_{idx:03d}_{slug}\n\n"
+        f"Severity {severity}/5, aggregation={aggregation}\n"
+        f"Rule: {rule_text[:120]}"
+    )
+    try:
+        repo.git.commit("-m", commit_msg)
+    except GitCommandError:
+        return "empty"
+    return "committed"
 def _write_rule_scenario_manifest(entries: list[dict], conn=None) -> None:
     """Persist a machine-readable branch-to-scenario manifest in SQLite."""
     manifest = {
@@ -833,11 +984,9 @@ def _branch_has_active_registration(branch_name: str, rule_id: int) -> bool:
     if not _branch_has_commits_ahead_of_main(branch_name):
         return False
 
-    scenario_path = _scenario_path_for_name(_scenario_name_for_rule(rule_id))
     checks = [
         ("grep", "-q", f"rule_{rule_id}", f"{branch_name}:src/evaluation/run_evaluation.py"),
         ("grep", "-q", f"^{rule_id}$", f"{branch_name}:src/evaluation/assets/with_vru.graph"),
-        ("cat_file", "-e", f"{branch_name}:{scenario_path}"),
     ]
     repo = Repo(SCENIC_RULES_PATH)
     for command, *args in checks:
@@ -854,8 +1003,6 @@ def _build_implementation_prompt(
     rule: dict,
     rule_id: int,
     slug: str,
-    scenario_name: str,
-    scenario_path: str,
     stl_info: dict,
 ) -> str:
     rule_text = rule["rule"]
@@ -868,9 +1015,8 @@ def _build_implementation_prompt(
         "You are working in the ScenicRules benchmark repository. Implement only "
         "this one generated rule and make no unrelated changes.\n\n"
         "First read src/rulebook_benchmark/rule_functions.py, "
-        "src/evaluation/run_evaluation.py, src/evaluation/cfgs/eval.yaml, the active "
-        "graph file under src/evaluation/assets/, and at least one scenario under "
-        "scenarios/common/.\n\n"
+        "src/evaluation/run_evaluation.py, src/evaluation/cfgs/eval.yaml, and the "
+        "active graph file under src/evaluation/assets/.\n\n"
         f"Create or update src/rulebook_benchmark/generated/rule_{idx:03d}_{slug}.py "
         "and src/rulebook_benchmark/generated/__init__.py.\n\n"
         f"Rule text: {rule_text}\n"
@@ -891,27 +1037,12 @@ def _build_implementation_prompt(
         f"includes {rule_id}. Add acyclic lowest-priority edges by connecting current "
         f"terminal graph nodes to {rule_id}. For non-VRU rules, also update "
         "no_vru.graph if appropriate.\n\n"
-        f"Create a targeted Scenic scenario at {scenario_path} with scenario name "
-        f"{scenario_name}. The scenario should exercise this exact rule with a clear "
-        "violating behavior and minimal unrelated traffic. Include "
-        "`from rulebook_benchmark import bench` and `require monitor bench.bench()`.\n\n"
-        "Scenic authoring requirements:\n"
-        "  - Follow scenarios/common/*.scenic conventions for map/model params, "
-        "behaviors, objects, and records.\n"
-        "  - Use an existing map path that works from scenarios/generated/, usually "
-        "`param map = localPath('../../maps/Town05.xodr')`.\n"
-        "  - Do not rely on traffic lights, stop signs, yield signs, crosswalks, "
-        "turn signals, sidewalks, or map features not exposed by the benchmark.\n"
-        "  - Keep the scene deterministic or lightly parameterized with require "
-        "constraints that avoid fragile rejection sampling.\n"
-        "  - Make reaching_goal work: define a real ego goal condition and record it "
-        "as `egoReachedGoal`. Do not leave egoReachedGoal always False.\n"
-        "  - Record useful geometry: ego polygon, ego lane polygon where available, "
-        "and relevant actor polygons/lane polygons.\n\n"
+        "Do not create or modify Scenic scenarios in this step. Scenic scenario "
+        "generation is handled outside the agent pipeline.\n\n"
         "Before finishing, run "
         f"`python3 -m py_compile src/evaluation/run_evaluation.py "
         f"src/rulebook_benchmark/generated/rule_{idx:03d}_{slug}.py` and fix errors. "
-        "If a one-sample evaluation is feasible, run it against the generated scenario "
+        "If a one-sample evaluation is feasible using an existing scenario, run it "
         "and fix syntax/import failures."
     )
 
@@ -920,6 +1051,7 @@ def step5_implement_rules(
     categorized_rules: list,
     stl_conversions: dict,
     conn,
+    parallel_workers: int = 1,
 ) -> list:
     """
     For each categorized rule, create a git branch in the ScenicRules repo and
@@ -930,21 +1062,39 @@ def step5_implement_rules(
     """
     stl_by_rule = {c["rule"]: c for c in stl_conversions.get("conversions", [])}
     n = len(categorized_rules)
-    results = []
-    implemented_count = 0
-    skipped_count = 0
+    if parallel_workers < 1:
+        raise ValueError("--parallel-workers must be at least 1")
+    worker_count = min(parallel_workers, n) if n else 1
+    results_by_idx: dict[int, dict] = {}
+    fetch_lock = threading.Lock()
 
     print(f"\n  Target repo   : {SCENIC_RULES_PATH}")
+    print(f"  Workspace dir : {AGENT_WORKSPACE_ROOT}")
+    print(f"  Agent logs    : {AGENT_LOG_DIR}")
+    print(f"  Docker image  : {AGENT_DOCKER_IMAGE}")
     print(f"  Rules to impl : {n}")
+    print(f"  Parallel jobs : {worker_count}")
     print(f"  OpenAI model  : {MODEL}")
     print(f"  Impl harness  : {IMPLEMENTATION_HARNESS}")
     print(f"  Impl provider : {IMPLEMENTATION_PROVIDER}")
     print(f"  Impl model    : {IMPLEMENTATION_MODEL}")
     print(f"  Reasoning     : {IMPLEMENTATION_REASONING}")
     print()
-    scenic_repo = Repo(SCENIC_RULES_PATH)
+    AGENT_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    for old_log in AGENT_LOG_DIR.glob("*.log"):
+        old_log.unlink()
+    try:
+        _ensure_agent_docker_image()
+    except Exception as exc:
+        (AGENT_LOG_DIR / "pipeline.log").write_text(
+            "[status] setup_error\n"
+            f"[docker_image] {AGENT_DOCKER_IMAGE}\n"
+            f"[error] {exc}\n"
+        )
+        raise
+    AGENT_WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
 
-    for idx, rule in enumerate(categorized_rules):
+    def worker(idx: int, rule: dict) -> tuple[int, dict]:
         rule_text = rule["rule"]
         category = rule["category"]
         aggregation = rule["aggregation"]
@@ -952,108 +1102,157 @@ def step5_implement_rules(
         rule_id = RULE_ID_OFFSET + idx
         slug = _rule_slug(rule_text)
         branch_name = f"rule/{idx:03d}-{category}-{slug}"[:80]
-        scenario_name = _scenario_name_for_rule(rule_id)
-        scenario_path = _scenario_path_for_name(scenario_name)
+        log_path = AGENT_LOG_DIR / f"{idx:03d}-{slug}.log"
+        log_prefix = f"  [{idx + 1:>2}/{n}] "
 
         display = rule_text[:70] + "…" if len(rule_text) > 70 else rule_text
-        print(f"  [{idx + 1:>2}/{n}] {display}")
-        print(f"         category={category}  severity={severity}/5  aggregation={aggregation}")
+        print(f"{log_prefix}{display}", flush=True)
+        print(f"{log_prefix}category={category} severity={severity}/5 aggregation={aggregation}", flush=True)
 
-        # Cache only if the branch has both the generated file and active-rule wiring.
         if _branch_has_active_registration(branch_name, rule_id):
-            print(f"         [cache hit — active branch exists] {branch_name}")
-            results.append({
+            print(f"{log_prefix}[cache hit] {branch_name}", flush=True)
+            return idx, {
                 "rule": rule_text, "category": category,
                 "branch": branch_name,
-                "scenario_name": scenario_name,
-                "scenario_path": scenario_path,
                 "status": "cached",
-            })
-            skipped_count += 1
-            _write_rule_scenario_manifest(results, conn)
-            continue
+                "agent_log_path": "",
+            }
 
-        # Create a new branch, or reuse an existing failed/generated-only branch.
-        try:
-            scenic_repo.git.checkout("main")
-            if _branch_exists(branch_name):
-                scenic_repo.git.checkout(branch_name)
-                print(f"         [retrying existing incomplete branch] {branch_name}")
-            else:
-                scenic_repo.git.checkout("-b", branch_name)
-        except GitCommandError as exc:
-            err = exc.stderr or str(exc)
-            print(f"         [ERROR preparing branch: {err}]")
-            results.append({
+        log_path.write_text(
+            "\n".join([
+                f"[rule_index] {idx}",
+                f"[rule_id] {rule_id}",
+                f"[rule] {rule_text}",
+                f"[category] {category}",
+                f"[severity] {severity}",
+                f"[aggregation] {aggregation}",
+                f"[branch] {branch_name}",
+                f"[model] {IMPLEMENTATION_PROVIDER}/{IMPLEMENTATION_MODEL}",
+                f"[reasoning] {IMPLEMENTATION_REASONING}",
+                "[status] starting",
+                "",
+            ]),
+        )
+
+        workspace_repo = AGENT_WORKSPACE_ROOT / f"{idx:03d}-{slug}" / "repo"
+        ok, err = _prepare_rule_workspace(workspace_repo, branch_name)
+        if not ok:
+            print(f"{log_prefix}[ERROR preparing workspace: {err}]", flush=True)
+            with log_path.open("a") as log_file:
+                log_file.write(f"\n[status] workspace_prepare_error\n[error] {err}\n")
+            return idx, {
                 "rule": rule_text, "category": category,
                 "branch": branch_name,
-                "scenario_name": scenario_name,
-                "scenario_path": scenario_path,
                 "status": "error",
-            })
-            _write_rule_scenario_manifest(results, conn)
-            continue
+                "agent_log_path": str(log_path),
+            }
 
         prompt = _build_implementation_prompt(
             idx=idx,
             rule=rule,
             rule_id=rule_id,
             slug=slug,
-            scenario_name=scenario_name,
-            scenario_path=scenario_path,
             stl_info=stl_by_rule.get(rule_text, {}),
         )
 
-        print("         [invoking Pi/DeepSeek …]")
-        success, _ = _invoke_deepseek_code(prompt)
+        print(f"{log_prefix}[invoking Pi/DeepSeek in Docker]", flush=True)
+        success, _ = _invoke_deepseek_code_in_docker(
+            prompt,
+            workspace_repo,
+            log_path,
+            log_prefix,
+        )
 
         if not success:
-            print("         [ERROR: Pi/DeepSeek exited non-zero]")
-            scenic_repo.git.checkout("main")
-            results.append({
+            print(f"{log_prefix}[ERROR: Pi/DeepSeek exited non-zero]", flush=True)
+            return idx, {
                 "rule": rule_text, "category": category,
                 "branch": branch_name,
-                "scenario_name": scenario_name,
-                "scenario_path": scenario_path,
                 "status": "error",
-            })
-            _write_rule_scenario_manifest(results, conn)
-            continue
+                "agent_log_path": str(log_path),
+            }
 
-        # Commit whatever Claude Code created and the active-rule registration.
-        scenic_repo.git.add(
-            "src/rulebook_benchmark/generated/",
-            "scenarios/generated/",
-            "src/evaluation/run_evaluation.py",
-            "src/evaluation/assets/with_vru.graph",
-            "src/evaluation/assets/no_vru.graph",
-        )
-        commit_msg = (
-            f"rule({category}): implement rule_{idx:03d}_{slug}\n\n"
-            f"Severity {severity}/5, aggregation={aggregation}\n"
-            f"Rule: {rule_text[:120]}\n"
-            f"Scenario: {scenario_name} ({scenario_path})"
-        )
         try:
-            scenic_repo.git.commit("-m", commit_msg)
+            status = _commit_rule_workspace(
+                workspace_repo,
+                category,
+                idx,
+                slug,
+                severity,
+                aggregation,
+                rule_text,
+            )
+            if status == "committed":
+                with fetch_lock:
+                    _fetch_workspace_branch_into_repo(workspace_repo, branch_name)
         except GitCommandError as exc:
             err = exc.stderr or str(exc)
-            print(f"         [WARNING: nothing to commit — {err}]")
-            status = "empty"
-        else:
-            print(f"         [committed] branch={branch_name}")
-            status = "committed"
-            implemented_count += 1
+            print(f"{log_prefix}[ERROR committing/fetching branch: {err}]", flush=True)
+            with log_path.open("a") as log_file:
+                log_file.write(f"\n[status] commit_or_fetch_error\n[error] {err}\n")
+            status = "error"
 
-        scenic_repo.git.checkout("main")
-        results.append({
+        print(f"{log_prefix}[{status}] branch={branch_name}", flush=True)
+        with log_path.open("a") as log_file:
+            log_file.write(f"\n[status] {status}\n")
+        return idx, {
             "rule": rule_text, "category": category,
             "branch": branch_name,
-            "scenario_name": scenario_name,
-            "scenario_path": scenario_path,
             "status": status,
-        })
-        _write_rule_scenario_manifest(results, conn)
+            "agent_log_path": str(log_path),
+        }
+
+    if n:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = {
+                executor.submit(worker, idx, rule): idx
+                for idx, rule in enumerate(categorized_rules)
+            }
+            for future in concurrent.futures.as_completed(futures):
+                idx = futures[future]
+                try:
+                    _, entry = future.result()
+                except Exception as exc:
+                    rule = categorized_rules[idx]
+                    rule_id = RULE_ID_OFFSET + idx
+                    slug = _rule_slug(rule["rule"])
+                    category = rule["category"]
+                    branch_name = f"rule/{idx:03d}-{category}-{slug}"[:80]
+                    entry = {
+                        "rule": rule["rule"],
+                        "category": category,
+                        "branch": branch_name,
+                        "status": "error",
+                        "error": str(exc),
+                        "agent_log_path": str(AGENT_LOG_DIR / f"{idx:03d}-{slug}.log"),
+                    }
+                    log_path = AGENT_LOG_DIR / f"{idx:03d}-{slug}.log"
+                    exception_text = (
+                        "\n[status] worker_exception\n"
+                        f"[error] {exc}\n"
+                    )
+                    if log_path.exists():
+                        with log_path.open("a") as log_file:
+                            log_file.write(exception_text)
+                    else:
+                        log_path.write_text(
+                            f"[rule_index] {idx}\n"
+                            f"[rule_id] {rule_id}\n"
+                            f"[rule] {rule['rule']}\n"
+                            f"[category] {category}\n"
+                            f"[branch] {branch_name}\n"
+                            f"{exception_text}"
+                        )
+                    print(f"  [{idx + 1:>2}/{n}] [ERROR: {exc}]", flush=True)
+                results_by_idx[idx] = entry
+                _write_rule_scenario_manifest(
+                    [results_by_idx[i] for i in sorted(results_by_idx)],
+                    conn,
+                )
+
+    results = [results_by_idx[i] for i in sorted(results_by_idx)]
+    implemented_count = sum(1 for r in results if r["status"] == "committed")
+    skipped_count = sum(1 for r in results if r["status"] == "cached")
 
     print()
     print(f"  Implemented (new branches) : {implemented_count}")
@@ -1061,7 +1260,7 @@ def step5_implement_rules(
     print(f"  Total                      : {n}")
 
     _write_rule_scenario_manifest(results, conn)
-    print("  Scenario manifest          : SQLite rule_scenario_manifest")
+    print("  Rule manifest              : SQLite rule_scenario_manifest")
 
     return results
 
@@ -1140,6 +1339,15 @@ def print_summary(extracted_rules, categorized, hierarchy, stl_conversions=None)
 # Main pipeline
 # ---------------------------------------------------------------------------
 def main():
+    parser = argparse.ArgumentParser(description="Generate ScenicRules rulebook branches.")
+    parser.add_argument(
+        "--parallel-workers",
+        type=int,
+        default=1,
+        help="Number of isolated Docker/Pi implementation workers to run in parallel.",
+    )
+    args = parser.parse_args()
+
     print("=" * 70)
     print("  Rulebook Generator — Pipeline")
     print("=" * 70)
@@ -1178,7 +1386,12 @@ def main():
     print(f"  → {stl_count} rules converted to STL formulas")
 
     print("\n[5/5] Implementing rules as Python code in ScenicRules …")
-    impl_results = step5_implement_rules(cat_rules, stl_conversions, conn)
+    impl_results = step5_implement_rules(
+        cat_rules,
+        stl_conversions,
+        conn,
+        parallel_workers=args.parallel_workers,
+    )
     cache_step_to_db(conn, "step5_implement_rules", "Implement Rules", impl_results)
     committed = sum(1 for r in impl_results if r["status"] == "committed")
     cached = sum(1 for r in impl_results if r["status"] == "cached")
@@ -1196,6 +1409,7 @@ def main():
             "implementation_provider": IMPLEMENTATION_PROVIDER,
             "implementation_model": IMPLEMENTATION_MODEL,
             "implementation_reasoning": IMPLEMENTATION_REASONING,
+            "parallel_workers": args.parallel_workers,
             "pipeline_steps": [
                 "extract_rules",
                 "categorize_and_severity",
@@ -1210,7 +1424,7 @@ def main():
         "stl_conversions": stl_conversions,
         "stl_examples": STL_EXAMPLES,
         "implemented_rules": impl_results,
-        "rule_scenario_manifest": {
+        "implemented_rule_manifest": {
             "entries": impl_results,
         },
     }

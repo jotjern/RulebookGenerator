@@ -1,0 +1,1005 @@
+#!/usr/bin/env python3
+"""Unified CLI for inspecting and operating the rule-generation data."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sqlite3
+import subprocess
+import sys
+import time
+import shutil
+from collections import Counter
+from dataclasses import dataclass
+from pathlib import Path
+from shutil import get_terminal_size
+
+from openai import OpenAI
+
+
+DEFAULT_REPO = Path(os.environ.get("SCENIC_RULES_PATH", "/Users/jogramnaestjernshaugen/ScenicRules"))
+DEFAULT_DB = Path("rulebook_pipeline.db")
+DEFAULT_LOG_DIR = Path("agent_logs")
+DEFAULT_WORKSPACES = Path(".rulegen_docker_workspaces")
+DEFAULT_MODEL = "deepseek-v4-pro"
+DEFAULT_IMAGE = "rulebook-generator-agents:latest"
+DEFAULT_LEGACY_MANIFEST = Path("generated_rule_scenarios.json")
+DEFAULT_BATCH_LIMIT = 7
+
+BRANCH_RE = re.compile(r"^rule/(?P<idx>\d{3})-(?P<category>[^-]+)-(?P<slug>.+)$")
+EXIT_CODE_RE = re.compile(r"^\[exit_code\]\s+(-?\d+)\s*$", re.MULTILINE)
+STATUS_RE = re.compile(r"^\[status\]\s+(.+)$", re.MULTILINE)
+ERROR_RE = re.compile(
+    r"error|exception|traceback|failed|fatal|permission denied|not found|"
+    r"no such file|timeout|rate limit|429|docker|daemon|git",
+    re.I,
+)
+
+client = None
+
+
+def load_dotenv(path: Path = Path(".env")) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            os.environ.setdefault(key, value)
+
+
+def deepseek_client() -> OpenAI:
+    global client
+    if client is None:
+        api_key = os.environ.get("DEEPSEEK_API_KEY")
+        if not api_key:
+            raise RuntimeError("DEEPSEEK_API_KEY is required for log summarization.")
+        client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+    return client
+
+
+def connect_db(db_path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def supports_color(no_color: bool) -> bool:
+    return sys.stdout.isatty() and not no_color and os.environ.get("TERM") != "dumb"
+
+
+def colorize(text: str, code: str, enabled: bool) -> str:
+    return f"\033[{code}m{text}\033[0m" if enabled else text
+
+
+def bold(text: str, enabled: bool) -> str:
+    return colorize(text, "1", enabled)
+
+
+def dim(text: str, enabled: bool) -> str:
+    return colorize(text, "2", enabled)
+
+
+def paint_status(text: str, enabled: bool, status: str) -> str:
+    colors = {
+        "committed": "32",
+        "cached": "36",
+        "empty": "33",
+        "error": "31",
+        "running": "35",
+        "missing": "31",
+        "ok": "32",
+        "stale": "33",
+        "unknown": "90",
+        "broken": "31",
+        "healthy": "32",
+        "degraded": "33",
+        "inconclusive": "90",
+        "failed": "31",
+    }
+    return colorize(text, colors.get(status, "90"), enabled)
+
+
+def truncate(text: str, width: int) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= width else text[: max(0, width - 1)] + "…"
+
+
+def box(title: str, subtitle: str | None, enabled: bool) -> None:
+    width = max(72, get_terminal_size((120, 20)).columns)
+    print()
+    print(colorize("=" * width, "36", enabled))
+    print(bold(f"  {title}", enabled))
+    if subtitle:
+        print(dim(f"  {subtitle}", enabled))
+    print(colorize("=" * width, "36", enabled))
+
+
+def chip(label: str, value: str, enabled: bool, status: str = "unknown") -> str:
+    return paint_status(f"[{label}: {value}]", enabled, status)
+
+
+def parse_branch(branch: str) -> tuple[int, str]:
+    match = BRANCH_RE.match(branch or "")
+    if not match:
+        return 9999, "other"
+    return int(match.group("idx")), match.group("category")
+
+
+def read_log_summary(path: Path) -> tuple[bool, int | None, str, str]:
+    if not path.exists():
+        return False, None, "missing", ""
+    text = path.read_text(errors="replace")
+    exit_match = EXIT_CODE_RE.findall(text)
+    status_match = STATUS_RE.findall(text)
+    error_line = ""
+    for line in reversed(text.splitlines()):
+        s = line.strip()
+        if not s:
+            continue
+        if ERROR_RE.search(s):
+            error_line = s
+            break
+    return True, int(exit_match[-1]) if exit_match else None, (status_match[-1] if status_match else "ok"), error_line
+
+
+def load_manifest_meta(conn: sqlite3.Connection) -> dict:
+    row = conn.execute(
+        """
+        SELECT scenic_rules_repo, generated_at, implementation_harness,
+               implementation_provider, implementation_model, implementation_reasoning
+        FROM rule_scenario_manifest
+        WHERE id = 1
+        """
+    ).fetchone()
+    return {key: row[key] for key in row.keys()} if row else {}
+
+
+def load_rule_rows(db_path: Path, log_dir: Path) -> list[dict]:
+    conn = connect_db(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT branch, rule_text, category, status, generated_at, updated_at,
+                   implementation_harness, implementation_provider,
+                   implementation_model, implementation_reasoning, entry_json
+            FROM generated_rule_scenarios
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+    parsed: list[dict] = []
+    for row in rows:
+        entry = {}
+        if row["entry_json"]:
+            try:
+                entry = json.loads(row["entry_json"])
+            except json.JSONDecodeError:
+                entry = {}
+
+        idx, category_from_branch = parse_branch(row["branch"])
+        category = row["category"] or category_from_branch
+        log_path_text = entry.get("agent_log_path") or str(log_dir / f"{idx:03d}-{row['branch'].split('-', 2)[-1]}.log")
+        log_exists, log_exit_code, log_status, log_error = read_log_summary(Path(log_path_text))
+        parsed.append(
+            {
+                "idx": idx,
+                "branch": row["branch"],
+                "category": category,
+                "rule": row["rule_text"],
+                "status": row["status"] or "unknown",
+                "generated_at": row["generated_at"] or "",
+                "updated_at": row["updated_at"] or "",
+                "implementation_harness": row["implementation_harness"] or "",
+                "implementation_provider": row["implementation_provider"] or "",
+                "implementation_model": row["implementation_model"] or "",
+                "implementation_reasoning": row["implementation_reasoning"] or "",
+                "agent_log_path": log_path_text,
+                "log_exists": log_exists,
+                "log_exit_code": log_exit_code,
+                "log_status": log_status,
+                "log_error": log_error,
+                "branch_exists": False,
+                "branch_ahead": None,
+            }
+        )
+    return sorted(parsed, key=lambda r: (r["idx"], r["branch"]))
+
+
+def load_legacy_manifest(manifest_path: Path) -> list[dict]:
+    if not manifest_path.exists():
+        return []
+    data = json.loads(manifest_path.read_text())
+    if isinstance(data, dict):
+        return data.get("entries", [])
+    if isinstance(data, list):
+        return data
+    return []
+
+
+def inspect_branches(repo: Path, rows: list[dict]) -> None:
+    if not repo.exists():
+        return
+    result = subprocess.run(
+        ["git", "branch", "--format=%(refname:short)", "--list", "rule/*"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    existing = {line.strip() for line in result.stdout.splitlines() if line.strip()} if result.returncode == 0 else set()
+    for row in rows:
+        row["branch_exists"] = row["branch"] in existing
+        if row["branch_exists"]:
+            ahead = subprocess.run(
+                ["git", "rev-list", "--count", f"main..{row['branch']}"],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+            )
+            row["branch_ahead"] = int(ahead.stdout.strip()) if ahead.returncode == 0 and ahead.stdout.strip().isdigit() else None
+
+
+def summarize_rows(rows: list[dict]) -> dict:
+    status_counts = Counter(row["status"] for row in rows)
+    category_counts = Counter(row["category"] for row in rows)
+    log_counts = Counter("present" if row["log_exists"] else "missing" for row in rows)
+    return {
+        "status_counts": status_counts,
+        "category_counts": category_counts,
+        "log_counts": log_counts,
+        "total": len(rows),
+        "errored": sum(1 for row in rows if row["status"] == "error"),
+        "missing_logs": sum(1 for row in rows if not row["log_exists"]),
+        "branch_missing": sum(1 for row in rows if not row["branch_exists"]),
+        "branch_empty": sum(1 for row in rows if row["branch_exists"] and row["branch_ahead"] == 0),
+        "branch_active": sum(1 for row in rows if row["branch_exists"] and (row["branch_ahead"] or 0) > 0),
+    }
+
+
+def print_status_dashboard(meta: dict, rows: list[dict], repo: Path, db_path: Path, log_dir: Path, color: bool) -> None:
+    stats = summarize_rows(rows)
+    box("Rulebook Generator Status", f"repo: {repo}  db: {db_path}  logs: {log_dir}", color)
+    print(
+        "  "
+        + "  ".join(
+            [
+                chip("rules", str(stats["total"]), color, "unknown"),
+                chip("committed", str(stats["status_counts"].get("committed", 0)), color, "committed"),
+                chip("cached", str(stats["status_counts"].get("cached", 0)), color, "cached"),
+                chip("errors", str(stats["status_counts"].get("error", 0)), color, "error"),
+                chip("logs", f"{stats['log_counts'].get('present', 0)}/{stats['total']}", color, "ok"),
+                chip("active branches", str(stats["branch_active"]), color, "committed"),
+                chip("missing branches", str(stats["branch_missing"]), color, "missing"),
+            ]
+        )
+    )
+    if meta:
+        print(
+            dim(
+                "  "
+                f"harness: {meta.get('implementation_harness', 'unknown')}  "
+                f"last run: {meta.get('generated_at', 'unknown')}  "
+                f"model: {meta.get('implementation_provider', 'unknown')}/"
+                f"{meta.get('implementation_model', 'unknown')}  "
+                f"reasoning: {meta.get('implementation_reasoning', 'unknown')}",
+                color,
+            )
+        )
+
+    latest_update = max((row["updated_at"] for row in rows if row["updated_at"]), default="")
+    if latest_update:
+        print(dim(f"  latest row update: {latest_update}", color))
+
+    print()
+    print(bold("Status", color))
+    print(f"{'#':>3}  {'db':<10} {'git':<6} {'log':<6} {'branch':<42} {'rule':<46}")
+    print("-" * 120)
+    for row in rows:
+        db_state = paint_status(f"{row['status']:<10}", color, row["status"])
+        git_state = "missing" if not row["branch_exists"] else f"+{row['branch_ahead']}" if row["branch_ahead"] is not None else "exists"
+        git_state = paint_status(
+            f"{git_state:<6}",
+            color,
+            "committed" if row["branch_ahead"] and row["branch_ahead"] > 0 else "empty" if row["branch_exists"] else "missing",
+        )
+        log_state = paint_status("ok    ", color, "ok") if row["log_exists"] else paint_status("missing", color, "missing")
+        print(f"{row['idx']:>3}  {db_state} {git_state} {log_state} {truncate(row['branch'], 42):<42} {truncate(row['rule'], 46):<46}")
+
+    print()
+    print(bold("Categories", color))
+    print(dim("  " + ", ".join(f"{name}={count}" for name, count in stats["category_counts"].most_common(10)), color))
+
+    warnings = []
+    stale_errors = [row for row in rows if row["status"] == "error" and row["log_error"]]
+    if stats["missing_logs"]:
+        warnings.append(f"{stats['missing_logs']} rows have no agent log on disk.")
+    if stats["branch_missing"]:
+        warnings.append(f"{stats['branch_missing']} branches are missing from ScenicRules.")
+    if stale_errors:
+        warnings.append(f"{len(stale_errors)} error logs contain a concrete failure line.")
+
+    if warnings:
+        print()
+        print(bold("Warnings", color))
+        for warning in warnings:
+            print(f"  - {warning}")
+        for row in stale_errors[:5]:
+            print(paint_status(f"  ! {row['branch']}", color, "error"))
+            print(f"    {truncate(row['log_error'], 100)}")
+
+    orphan_logs = find_orphan_logs(log_dir, rows)
+    if orphan_logs:
+        print()
+        print(bold("Orphan Logs", color))
+        for path in orphan_logs[:10]:
+            print(f"  - {path.name}")
+
+
+def find_orphan_logs(log_dir: Path, rows: list[dict]) -> list[Path]:
+    if not log_dir.exists():
+        return []
+    referenced = {Path(row["agent_log_path"]).resolve() for row in rows if row.get("agent_log_path")}
+    return sorted(path.resolve() for path in log_dir.glob("*.log") if path.resolve() not in referenced)
+
+
+def summarize_logs_with_model(bundle_text: str, log_count: int, model: str) -> dict:
+    prompt = (
+        "You are reviewing logs from a rule-generation pipeline.\n"
+        "Read the entire log bundle and produce a concise but specific\n"
+        "assessment of what is going wrong, what is healthy, and what the\n"
+        "pipeline should change.\n\n"
+        f"There are {log_count} log files in the bundle.\n"
+        "Do not use heuristics or guess from filenames. Base your report only on\n"
+        "the attached logs. Call out repeated failures, setup problems, tool\n"
+        "issues, and anything that looks like a systemic pipeline defect.\n"
+        "Return valid JSON only. Use this shape:\n"
+        "{\n"
+        '  "overall_assessment": "string",\n'
+        '  "health": "healthy|degraded|broken|inconclusive",\n'
+        '  "top_issues": [{"issue":"string","why_it_matters":"string","evidence":["string"],"recommended_fix":"string"}],\n'
+        '  "per_log_findings": [{"log_file":"string","status":"string","one_line_summary":"string","main_problem":"string","next_action":"string"}],\n'
+        '  "pipeline_feedback": ["string"],\n'
+        '  "next_steps": ["string"]\n'
+        "}"
+    )
+    response = deepseek_client().chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": "You are a precise software pipeline reviewer."},
+            {"role": "user", "content": f"{prompt}\n\n--- LOG BUNDLE START ---\n{bundle_text}\n--- LOG BUNDLE END ---"},
+        ],
+        max_tokens=4096,
+        reasoning_effort="high",
+        extra_body={"thinking": {"type": "enabled"}},
+        response_format={"type": "json_object"},
+    )
+    return json.loads(response.choices[0].message.content)
+
+
+def print_log_report(report: dict, log_count: int, model: str) -> None:
+    print("Agent Log Summary")
+    print("=================")
+    print(f"model      : {model}")
+    print(f"logs found : {log_count}")
+    print(f"health     : {report['health']}")
+    print()
+    print(report["overall_assessment"])
+    if report["top_issues"]:
+        print("\nTop Issues")
+        print("----------")
+        for item in report["top_issues"]:
+            print(f"- {item['issue']}")
+            print(f"  why: {item['why_it_matters']}")
+            for evidence in item["evidence"]:
+                print(f"  evidence: {evidence}")
+            print(f"  fix: {item['recommended_fix']}")
+    if report["per_log_findings"]:
+        print("\nPer Log Findings")
+        print("----------------")
+        for item in report["per_log_findings"]:
+            print(f"- {item['log_file']} [{item['status']}]")
+            print(f"  summary: {item['one_line_summary']}")
+            print(f"  problem: {item['main_problem']}")
+            print(f"  next: {item['next_action']}")
+    if report["pipeline_feedback"]:
+        print("\nPipeline Feedback")
+        print("-----------------")
+        for item in report["pipeline_feedback"]:
+            print(f"- {item}")
+    if report["next_steps"]:
+        print("\nNext Steps")
+        print("----------")
+        for item in report["next_steps"]:
+            print(f"- {item}")
+
+
+def db_rows_from_legacy_manifest(manifest_path: Path, log_dir: Path) -> list[dict]:
+    entries = load_legacy_manifest(manifest_path)
+    rows: list[dict] = []
+    for idx, entry in enumerate(entries):
+        branch = entry.get("branch", f"entry_{idx}")
+        status = entry.get("status", "unknown")
+        scenario_name = entry.get("scenario_name", "")
+        scenario_path = entry.get("scenario_path", "")
+        log_path = Path(entry.get("agent_log_path") or (log_dir / f"{idx:03d}-{branch.split('-', 2)[-1]}.log"))
+        log_exists, log_exit_code, log_status, log_error = read_log_summary(log_path)
+        rows.append(
+            {
+                "idx": idx,
+                "branch": branch,
+                "category": entry.get("category", ""),
+                "rule": entry.get("rule", ""),
+                "status": status,
+                "generated_at": entry.get("generated_at", ""),
+                "updated_at": entry.get("generated_at", ""),
+                "implementation_harness": entry.get("implementation_harness", ""),
+                "implementation_provider": entry.get("implementation_provider", ""),
+                "implementation_model": entry.get("implementation_model", ""),
+                "implementation_reasoning": entry.get("implementation_reasoning", ""),
+                "agent_log_path": str(log_path),
+                "log_exists": log_exists,
+                "log_exit_code": log_exit_code,
+                "log_status": log_status,
+                "log_error": log_error,
+                "branch_exists": False,
+                "branch_ahead": None,
+                "scenario_name": scenario_name,
+                "scenario_path": scenario_path,
+            }
+        )
+    return rows
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    repo = args.repo.expanduser().resolve()
+    db_path = args.db.expanduser().resolve()
+    log_dir = args.log_dir.expanduser().resolve()
+    color = supports_color(args.no_color)
+    if not db_path.exists():
+        raise RuntimeError(f"Database not found: {db_path}")
+    conn = connect_db(db_path)
+    try:
+        meta = load_manifest_meta(conn)
+    finally:
+        conn.close()
+    rows = load_rule_rows(db_path, log_dir)
+    inspect_branches(repo, rows)
+    if args.json:
+        print(json.dumps({"meta": meta, "rows": rows, "summary": summarize_rows(rows)}, indent=2))
+    else:
+        print_status_dashboard(meta, rows, repo, db_path, log_dir, color)
+    return 0
+
+
+def cmd_logs(args: argparse.Namespace) -> int:
+    log_paths = sorted(args.log_dir.expanduser().resolve().glob("*.log")) if args.log_dir.exists() else []
+    if not log_paths:
+        print("No agent logs found.")
+        return 0
+    bundle = "\n".join(
+        f"=== LOG {i}/{len(log_paths)}: {path} ===\n{path.read_text(errors='replace')}\n=== END LOG {i}/{len(log_paths)} ===\n"
+        for i, path in enumerate(log_paths, start=1)
+    )
+    report = summarize_logs_with_model(bundle, len(log_paths), args.model)
+    print_log_report(report, len(log_paths), args.model)
+    return 0
+
+
+def manifest_like_rows(args: argparse.Namespace) -> list[dict]:
+    db_path = args.db.expanduser().resolve()
+    if db_path.exists():
+        return load_rule_rows(db_path, args.log_dir.expanduser().resolve())
+    if args.manifest.exists():
+        return db_rows_from_legacy_manifest(args.manifest.expanduser().resolve(), args.log_dir.expanduser().resolve())
+    return []
+
+
+def find_entry(rows: list[dict], args: argparse.Namespace) -> dict:
+    matches = rows
+    if args.rule_id is not None:
+        matches = [
+            row
+            for row in matches
+            if row["idx"] == args.rule_id or (row["idx"] + 100) == args.rule_id
+        ]
+    if args.branch:
+        matches = [row for row in matches if row["branch"] == args.branch]
+    if args.scenario:
+        matches = [row for row in matches if row.get("scenario_name") == args.scenario or row.get("scenario_path") == args.scenario]
+    if not matches:
+        raise RuntimeError("No entry matched the requested selector.")
+    if len(matches) > 1:
+        labels = "\n".join(f"  {row['branch']} -> {row['rule'][:80]}" for row in matches[:20])
+        raise RuntimeError("Selector matched multiple entries. Narrow it down:\n" + labels)
+    return matches[0]
+
+
+def branch_exists(repo: Path, branch: str) -> bool:
+    result = subprocess.run(["git", "rev-parse", "--verify", branch], cwd=repo, capture_output=True, text=True)
+    return result.returncode == 0
+
+
+def git(repo: Path, *args: str, capture: bool = True, check: bool = True) -> subprocess.CompletedProcess:
+    kwargs = {"cwd": repo, "text": True}
+    if capture:
+        kwargs["capture_output"] = True
+    result = subprocess.run(["git", *args], **kwargs)
+    if check and result.returncode != 0:
+        msg = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(f"git {' '.join(args)} failed: {msg}")
+    return result
+
+
+def require_clean_worktree(repo: Path) -> None:
+    status = git(repo, "status", "--porcelain").stdout.strip()
+    if status:
+        raise RuntimeError("ScenicRules worktree has uncommitted changes. Commit/stash them or rerun with --allow-dirty.")
+
+
+def current_branch(repo: Path) -> str:
+    return git(repo, "branch", "--show-current").stdout.strip()
+
+
+def worktree_branch_usage(repo: Path) -> dict[str, list[Path]]:
+    result = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip() or "failed to list worktrees"
+        raise RuntimeError(message)
+    usage: dict[str, list[Path]] = {}
+    current_path: Path | None = None
+    current_branch: str | None = None
+
+    def flush_current() -> None:
+        nonlocal current_path, current_branch
+        if current_path is not None and current_branch:
+            usage.setdefault(current_branch, []).append(current_path)
+
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            flush_current()
+            current_path = Path(line.split(" ", 1)[1].strip())
+            current_branch = None
+        elif line.startswith("branch "):
+            current_branch = line.split(" ", 1)[1].strip()
+            if current_branch.startswith("refs/heads/"):
+                current_branch = current_branch.removeprefix("refs/heads/")
+    flush_current()
+    return usage
+
+
+def extract_violation_summary(combined_log: str) -> str:
+    lines_out: list[str] = []
+    markers = ("Average error value:", "Rule violation count:", "Number of unique violations:", "Unique violations:")
+    for line in combined_log.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if any(m in s for m in markers):
+            lines_out.append(s)
+        elif "Results for " in s and "seed:" in s:
+            lines_out.append(s)
+    return "\n".join(lines_out)
+
+
+def print_violation_footer(summary: str, returncode: int) -> None:
+    print()
+    print("-" * 78)
+    print("  Violation scores (from evaluation log)")
+    print("-" * 78)
+    if returncode != 0:
+        print(f"  (run exited with status {returncode}; summary may be incomplete)")
+    if summary.strip():
+        for block_line in summary.splitlines():
+            print(f"  {block_line}")
+    else:
+        print("  (No aggregate violation lines found in output — check full log above.)")
+    print("-" * 78)
+
+
+def print_rule_context(index: int, total: int, row: dict) -> None:
+    width = 78
+    print()
+    print("=" * width)
+    print(f"  Run {index}/{total}  rule id {row['idx']}  [{row['category']}]  manifest={row['status']}")
+    print(f"  Branch:   {row['branch']}")
+    print(f"  Rule:     {truncate(row['rule'], 54)}")
+    print("-" * width)
+    print("=" * width)
+
+
+def load_entry_selection(args: argparse.Namespace) -> tuple[list[dict], bool]:
+    rows = manifest_like_rows(args)
+    if args.list:
+        return rows, False
+    single = args.branch is not None or args.rule_id is not None or args.scenario is not None
+    if single:
+        return [find_entry(rows, args)], True
+    n = args.batch_first_n
+    if n == 0:
+        return rows, True
+    return rows[:n], True
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    repo = args.repo.expanduser().resolve()
+    if not args.allow_dirty:
+        require_clean_worktree(repo)
+    original_branch = current_branch(repo)
+    rows = manifest_like_rows(args)
+    if args.list:
+        for row in rows:
+            print(f"{row.get('idx', ''):03d} {row.get('status', ''):10s} {row.get('branch', '')}")
+        return 0
+    if args.branch or args.rule_id is not None or args.scenario:
+        to_run = [find_entry(rows, args)]
+    else:
+        to_run = rows if args.batch_first_n == 0 else rows[: args.batch_first_n]
+        if not to_run:
+            print("No manifest entries to run.", file=sys.stderr)
+            return 1
+        print(
+            f"\nBatch mode: the first {len(to_run)} row(s) in file order. "
+            "Adjust count with --first N (alias --limit).\n",
+            flush=True,
+        )
+
+    failed = 0
+    try:
+        for i, row in enumerate(to_run, start=1):
+            print_rule_context(i, len(to_run), row)
+            branch = row["branch"]
+            scenario_name = row.get("scenario_name", "")
+            scenario_path = row.get("scenario_path", "")
+            if not branch_exists(repo, branch):
+                print(f"ERROR: Branch does not exist in ScenicRules: {branch}", file=sys.stderr)
+                failed += 1
+                continue
+            eval_dir = repo / "src" / "evaluation"
+            scenario_abs = repo / scenario_path if scenario_path else None
+            if scenario_abs and not scenario_abs.exists():
+                print(f"ERROR: Scenario does not exist on branch {branch}: {scenario_path}", file=sys.stderr)
+                failed += 1
+                continue
+            venv_python = repo / ".venv" / "bin" / "python"
+            python_exe = args.python or (str(venv_python) if venv_python.exists() else "python3")
+            git(repo, "checkout", branch, capture=False)
+            overrides = args.overrides
+            if overrides and overrides[0] == "--":
+                overrides = overrides[1:]
+            command = [
+                python_exe,
+                "run_evaluation.py",
+                "--config-name=eval.yaml",
+                "hydra.job.chdir=False",
+                "hydra.output_subdir=null",
+            ]
+            if scenario_abs:
+                command.extend(
+                    [
+                        f"scenic.file_path={os.path.relpath(scenario_abs, eval_dir)}",
+                        f"scenic.scenario_name={scenario_name}",
+                    ]
+                )
+            command.extend(
+                [
+                    f"experiment.num_samples={args.samples}",
+                    f"experiment.num_seeds={args.seeds}",
+                    "falsification.sampler_type=mab",
+                    "falsification.active=True",
+                    *overrides,
+                ]
+            )
+            print("Running simulation:")
+            print("  " + " ".join(command))
+            proc = subprocess.run(command, cwd=eval_dir, capture_output=True, text=True)
+            combined = (proc.stdout or "") + (proc.stderr or "")
+            print(combined, end="" if combined.endswith("\n") else "\n")
+            summary = extract_violation_summary(combined)
+            print_violation_footer(summary, proc.returncode)
+            if proc.returncode != 0:
+                failed += 1
+    finally:
+        if args.restore and original_branch:
+            cur = current_branch(repo)
+            if cur != original_branch:
+                print(f"Restoring {original_branch}")
+                git(repo, "checkout", original_branch, capture=False, check=False)
+    if len(to_run) > 1:
+        print()
+        print(f"Batch finished: {len(to_run) - failed}/{len(to_run)} runs succeeded, {failed} failed.")
+    return 1 if failed else 0
+
+
+def branch_ahead_of_main(repo: Path, branch: str) -> int | None:
+    result = git(repo, "rev-list", "--count", f"main..{branch}", capture=True, check=False)
+    if result.returncode != 0:
+        return None
+    try:
+        return int(result.stdout.strip())
+    except ValueError:
+        return None
+
+
+def workspace_commits_ahead(workspace_repo: Path) -> int | None:
+    result = subprocess.run(["git", "rev-list", "--count", "origin/main..HEAD"], cwd=workspace_repo, capture_output=True, text=True)
+    if result.returncode != 0:
+        return None
+    try:
+        return int(result.stdout.strip())
+    except ValueError:
+        return None
+
+
+def fetch_branch_into_repo(scenic: Path, workspace_repo: Path, branch: str) -> tuple[bool, str]:
+    result = subprocess.run(
+        ["git", "fetch", "--force", str(workspace_repo.resolve()), f"{branch}:refs/heads/{branch}"],
+        cwd=scenic,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        return True, ""
+    err = result.stderr.strip() or result.stdout.strip()
+    return False, err or "(no stderr)"
+
+
+def update_manifest_entries(db_path: Path, synced_branches: list[str]) -> int:
+    conn = connect_db(db_path)
+    try:
+        rows = conn.execute("SELECT branch, entry_json FROM generated_rule_scenarios").fetchall()
+        changed = 0
+        for row in rows:
+            branch = row["branch"]
+            if branch not in synced_branches:
+                continue
+            try:
+                entry = json.loads(row["entry_json"])
+            except json.JSONDecodeError:
+                entry = {}
+            if entry.get("status") not in ("sync_failed", "error", "empty"):
+                continue
+            entry["status"] = "committed"
+            conn.execute(
+                "UPDATE generated_rule_scenarios SET status = ?, entry_json = ?, updated_at = CURRENT_TIMESTAMP WHERE branch = ?",
+                ("committed", json.dumps(entry, indent=2), branch),
+            )
+            changed += 1
+        if changed:
+            conn.commit()
+        return changed
+    finally:
+        conn.close()
+
+
+def delete_generated_branches(repo: Path) -> list[str]:
+    result = subprocess.run(
+        ["git", "branch", "--format=%(refname:short)", "--list", "rule/*"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "failed to list generated branches")
+    branches = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    usage = worktree_branch_usage(repo)
+    removed: list[str] = []
+    current = current_branch(repo)
+    if current in branches:
+        status = git(repo, "status", "--porcelain").stdout.strip()
+        if status:
+            raise RuntimeError(
+                f"Cannot purge while ScenicRules worktree is dirty on {current}. "
+                "Commit or stash changes first."
+            )
+        git(repo, "checkout", "main", capture=False)
+    for branch in branches:
+        holders = usage.get(branch, [])
+        other_holders = [path for path in holders if path.resolve() != repo.resolve()]
+        if other_holders:
+            raise RuntimeError(
+                f"Cannot delete branch {branch}; it is still checked out in: "
+                + ", ".join(str(path) for path in other_holders)
+            )
+        delete = subprocess.run(
+            ["git", "branch", "-D", branch],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        )
+        if delete.returncode != 0:
+            message = delete.stderr.strip() or delete.stdout.strip()
+            raise RuntimeError(f"git branch -D {branch} failed: {message}")
+        removed.append(branch)
+    return removed
+
+
+def cmd_purge(args: argparse.Namespace) -> int:
+    if not args.yes:
+        print("This will permanently delete generated rule branches in ScenicRules.")
+        print("It will not touch the SQLite database, logs, workspaces, or caches.")
+        print()
+        if not sys.stdin.isatty():
+            print("Refusing to purge without --yes in non-interactive mode.", file=sys.stderr)
+            return 1
+        answer = input("Type 'purge-generated' to continue: ").strip().lower()
+        if answer != "purge-generated":
+            print("Aborted.")
+            return 1
+
+    deleted_branches = delete_generated_branches(args.repo)
+
+    if deleted_branches:
+        print("Deleted branches:")
+        for branch in deleted_branches:
+            print(f"  - {branch}")
+    else:
+        print("Deleted branches: none")
+    return 0
+
+
+def cmd_sync(args: argparse.Namespace) -> int:
+    scenic = args.repo.expanduser().resolve()
+    workspaces = args.workspaces.expanduser().resolve()
+    db_path = args.db.expanduser().resolve()
+    if not scenic.is_dir():
+        print(f"ScenicRules repo not found: {scenic}", file=sys.stderr)
+        return 1
+    if not workspaces.is_dir():
+        print(f"Workspaces directory not found: {workspaces}", file=sys.stderr)
+        return 1
+    synced: list[str] = []
+    ok_count = 0
+    skip_count = 0
+    for workspace_repo in sorted(workspaces.glob("*/repo")):
+        if not workspace_repo.is_dir():
+            continue
+        br = subprocess.run(["git", "branch", "--show-current"], cwd=workspace_repo, capture_output=True, text=True)
+        if br.returncode != 0:
+            print(f"[skip] no branch: {workspace_repo}")
+            continue
+        branch = br.stdout.strip()
+        if not branch:
+            continue
+        ahead_ws = workspace_commits_ahead(workspace_repo)
+        if ahead_ws is None:
+            print(f"[skip] cannot count ahead: {workspace_repo}")
+            continue
+        if ahead_ws == 0:
+            skip_count += 1
+            continue
+        scenic_ahead_before = branch_ahead_of_main(scenic, branch)
+        if scenic_ahead_before is not None and scenic_ahead_before >= ahead_ws:
+            print(f"[ok already] {branch} scenic main..branch={scenic_ahead_before}")
+            ok_count += 1
+            synced.append(branch)
+            continue
+        print(f"[sync] {branch}  workspace_commits_ahead={ahead_ws}  {workspace_repo}")
+        if args.dry_run:
+            synced.append(branch)
+            ok_count += 1
+            continue
+        success, err = fetch_branch_into_repo(scenic, workspace_repo, branch)
+        if not success:
+            print(f"  FAILED: {err}", file=sys.stderr)
+            continue
+        scenic_ahead = branch_ahead_of_main(scenic, branch)
+        if scenic_ahead is None or scenic_ahead <= 0:
+            print(f"  FAILED: fetch reported ok but main..{branch}={scenic_ahead}", file=sys.stderr)
+            continue
+        print(f"  -> scenic main..branch={scenic_ahead}")
+        ok_count += 1
+        synced.append(branch)
+    print()
+    print(f"synced={ok_count} skipped_empty_workspace={skip_count} workspaces_root={workspaces}")
+    if args.update_manifest:
+        n = update_manifest_entries(db_path, synced) if not args.dry_run else 0
+        if args.dry_run:
+            print("--update-manifest ignored with --dry-run")
+        else:
+            print(f"manifest rows updated to committed: {n}")
+    return 0
+
+
+def cmd_summary(args: argparse.Namespace) -> int:
+    log_dir = args.log_dir.expanduser().resolve()
+    log_paths = sorted(log_dir.glob("*.log")) if log_dir.exists() else []
+    if not log_paths:
+        print("No agent logs found.")
+        return 0
+    bundle = "\n".join(
+        f"=== LOG {i}/{len(log_paths)}: {path} ===\n{path.read_text(errors='replace')}\n=== END LOG {i}/{len(log_paths)} ===\n"
+        for i, path in enumerate(log_paths, start=1)
+    )
+    report = summarize_logs_with_model(bundle, len(log_paths), args.model)
+    print_log_report(report, len(log_paths), args.model)
+    return 0
+
+
+def cmd_status_legacy(args: argparse.Namespace) -> int:
+    # Used when a user wants the old standalone status view with a single unified tool.
+    return cmd_status(args)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Unified CLI for rulebook data and artifacts.")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    p = subparsers.add_parser("status", help="Show pipeline status from SQLite, git, and logs.")
+    p.add_argument("--repo", type=Path, default=DEFAULT_REPO)
+    p.add_argument("--db", type=Path, default=DEFAULT_DB)
+    p.add_argument("--log-dir", type=Path, default=DEFAULT_LOG_DIR)
+    p.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    p.add_argument("--no-color", action="store_true", help="Disable ANSI colors.")
+    p.set_defaults(func=cmd_status)
+
+    p = subparsers.add_parser("summary", help="Summarize agent logs with DeepSeek.")
+    p.add_argument("--log-dir", type=Path, default=DEFAULT_LOG_DIR)
+    p.add_argument("--model", default=os.environ.get("SUMMARY_MODEL", DEFAULT_MODEL))
+    p.set_defaults(func=cmd_summary)
+
+    p = subparsers.add_parser("purge", help="Delete generated branches from ScenicRules.")
+    p.add_argument("--repo", type=Path, default=DEFAULT_REPO)
+    p.add_argument("--yes", action="store_true", help="Actually perform the purge without prompting.")
+    p.set_defaults(func=cmd_purge)
+
+    p = subparsers.add_parser("run", help="Run generated rule entries.")
+    p.add_argument("--manifest", type=Path, default=DEFAULT_LEGACY_MANIFEST, help="Legacy manifest path; DB is preferred.")
+    p.add_argument("--db", type=Path, default=DEFAULT_DB)
+    p.add_argument("--repo", type=Path, default=DEFAULT_REPO)
+    p.add_argument("--branch", help="Generated branch to checkout.")
+    p.add_argument("--scenario", help="Scenario name or repo-relative path.")
+    p.add_argument("--rule-id", type=int, help="Generated rule id.")
+    p.add_argument("--first", "--limit", type=int, default=DEFAULT_BATCH_LIMIT, metavar="N", dest="batch_first_n")
+    p.add_argument("--list", action="store_true", help="List available entries and exit.")
+    p.add_argument("--samples", type=int, default=1)
+    p.add_argument("--seeds", type=int, default=1)
+    p.add_argument("--python", default=None)
+    p.add_argument("--allow-dirty", action="store_true")
+    p.add_argument("--restore", action="store_true")
+    p.add_argument("overrides", nargs=argparse.REMAINDER)
+    p.set_defaults(func=cmd_run)
+
+    p = subparsers.add_parser("sync", help="Fetch committed workspaces back into ScenicRules.")
+    p.add_argument("--repo", type=Path, default=DEFAULT_REPO)
+    p.add_argument("--workspaces", type=Path, default=DEFAULT_WORKSPACES)
+    p.add_argument("--db", type=Path, default=DEFAULT_DB)
+    p.add_argument("--update-manifest", action="store_true")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(func=cmd_sync)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    load_dotenv()
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command in {"status", "summary", "run", "sync", "purge"}:
+        if hasattr(args, "repo"):
+            args.repo = args.repo.expanduser().resolve()
+        if hasattr(args, "db"):
+            args.db = args.db.expanduser().resolve()
+        if hasattr(args, "log_dir"):
+            args.log_dir = args.log_dir.expanduser().resolve()
+        if hasattr(args, "workspaces"):
+            args.workspaces = args.workspaces.expanduser().resolve()
+        if hasattr(args, "manifest"):
+            args.manifest = args.manifest.expanduser().resolve()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
