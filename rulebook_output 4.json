@@ -1,0 +1,1710 @@
+{
+  "metadata": {
+    "source": "California Driver's Handbook",
+    "model": "gpt-5.4",
+    "timestamp": "2026-05-05T15:01:39.924573",
+    "database_path": "rulebook_pipeline.db",
+    "rule_scenario_manifest_path": "generated_rule_scenarios.json",
+    "implementation_harness": "pi",
+    "implementation_isolation": "docker",
+    "parallel_workers": 10,
+    "pipeline_steps": [
+      "extract_rules",
+      "categorize_and_severity",
+      "build_hierarchy",
+      "convert_to_stl",
+      "implement_rules"
+    ]
+  },
+  "extracted_rules": [
+    "The driver does not allow the ego vehicle to collide with any vehicle, pedestrian, or bicyclist.",
+    "The driver maintains enough time-to-collision and stopping margin to avoid imminent conflict with any vehicle, pedestrian, or bicyclist ahead or on a crossing path.",
+    "The driver yields when entering a lane, merging, or crossing into traffic and does not force another road user to brake sharply or take evasive action.",
+    "The driver yields before turning left across the path of an oncoming vehicle, bicyclist, or pedestrian when the gap is too small for safe completion.",
+    "The driver yields before turning right when a pedestrian, bicyclist, or motorcyclist is in or dangerously near the turning path.",
+    "The driver yields to traffic already circulating in a roundabout and enters only when a safe gap exists.",
+    "The driver does not enter an intersection or conflicting area unless there is enough downstream space to clear it without stopping in conflict.",
+    "The driver stays entirely within the drivable region and does not let any part of the ego footprint leave the roadway.",
+    "The driver travels in a lane whose direction matches the ego heading and does not proceed in an incorrect-direction lane.",
+    "The driver keeps to the correct side of the road and does not drive into opposing traffic lanes except when a lawful maneuver is geometrically necessary.",
+    "The driver maintains lane discipline and does not straddle multiple lanes without committing to a lane change.",
+    "The driver performs lane changes only when adjacent-lane clearance and relative motion make the maneuver safe.",
+    "The driver completes a lane change smoothly, without abrupt lateral motion or cutting in with insufficient longitudinal gap.",
+    "The driver stays reasonably centered within the current lane when not intentionally changing lanes or navigating an intersection.",
+    "The driver does not weave repeatedly across lanes or make unnecessary successive lane changes.",
+    "The driver enters and exits lanes only through geometrically permitted openings and does not cross lane barriers that should not be crossed.",
+    "The driver uses the proper lane for a turn and does not begin a turn from a lane inconsistent with the road geometry.",
+    "The driver completes a right turn into the nearest appropriate lane and does not swing wide into an adjacent lane.",
+    "The driver completes a left turn without encroaching into an opposing lane more than necessary and ends in a compatible destination lane.",
+    "The driver does not drive the wrong way within a one-way or otherwise direction-constrained roadway segment.",
+    "The driver obeys the applicable lane speed limit whenever a speed limit is available for the ego\u2019s current lane.",
+    "The driver does not travel too fast for local geometry and conflict conditions, including curves, intersections, merges, and dense traffic.",
+    "The driver does not impede traffic by traveling substantially slower than surrounding traffic without a geometric reason.",
+    "The driver maintains a safe following distance behind a lead vehicle, expressed as distance or time headway shortfall.",
+    "The driver does not cut in front of another vehicle with an unsafe post-merge headway.",
+    "The driver leaves adequate lateral clearance when passing a bicyclist, with violation severity based on the shortfall below three feet.",
+    "The driver does not pass a bicyclist, pedestrian, or other vulnerable road user with unreasonably small lateral clearance even when lane boundaries are ambiguous.",
+    "The driver does not overtake or pass another vehicle when oncoming conflict geometry leaves insufficient space or time to return safely.",
+    "The driver does not drive directly alongside another vehicle for an extended time when avoidable and when lateral separation is small.",
+    "The driver leaves enough space around large vehicles and does not merge directly in front of them with inadequate stopping margin.",
+    "The driver avoids sustained occupation of another vehicle\u2019s blind-spot region when close lateral proximity and matched longitudinal position make the situation hazardous.",
+    "The driver does not approach a stationary or slow actor so quickly that the remaining stopping distance becomes insufficient.",
+    "The driver avoids excessive longitudinal acceleration that would indicate harsh or uncomfortable driving.",
+    "The driver avoids excessive braking deceleration that would indicate harsh or emergency braking beyond what the situation requires.",
+    "The driver avoids excessive jerk and therefore does not make abrupt changes in acceleration that create discomfort or instability.",
+    "The driver avoids excessive lateral acceleration in turns and lane changes.",
+    "The driver avoids combined high curvature and speed that produce uncomfortable or unstable cornering.",
+    "The driver slows appropriately when negotiating a turn, merge, roundabout, or other constrained geometry so the maneuver remains smooth and controlled.",
+    "The driver does not stop in a travel lane or conflict area when a safe continuation was available and surrounding actors make the stop hazardous.",
+    "The driver, when passing a stopped or slow vulnerable road user nearby, reduces speed enough that low clearance is not compounded by high closing speed.",
+    "The driver maintains extra caution near pedestrians by reducing speed and preserving a protective buffer when a pedestrian is near the ego path.",
+    "The driver maintains extra caution near bicyclists by reducing speed and preserving a protective buffer when a bicyclist is near the ego path.",
+    "The driver does not create a near-collision during any merge, turn, pass, or lane change, even if contact is ultimately avoided.",
+    "The driver does not remain in an intersection or junction conflict zone long enough to obstruct cross traffic or expose the vehicle to avoidable conflict.",
+    "The driver does not reverse or otherwise move contrary to lane direction in a live lane when surrounding traffic makes the maneuver hazardous."
+  ],
+  "categorized_rules": [
+    {
+      "rule": "The driver does not allow the ego vehicle to collide with any vehicle, pedestrian, or bicyclist.",
+      "category": "collision_avoidance",
+      "severity": 5,
+      "involves_collision": true,
+      "aggregation": "max",
+      "rationale": "Any polygon intersection with another road user is a catastrophic safety failure, so the trajectory should be scored by the worst single collision event."
+    },
+    {
+      "rule": "The driver maintains enough time-to-collision and stopping margin to avoid imminent conflict with any vehicle, pedestrian, or bicyclist ahead or on a crossing path.",
+      "category": "collision_avoidance",
+      "severity": 4,
+      "involves_collision": true,
+      "aggregation": "max",
+      "rationale": "Critically low TTC or stopping margin signals an immediate crash risk with potentially severe injury, and a single worst-case imminent-conflict moment is the key outcome."
+    },
+    {
+      "rule": "The driver yields when entering a lane, merging, or crossing into traffic and does not force another road user to brake sharply or take evasive action.",
+      "category": "right_of_way",
+      "severity": 4,
+      "involves_collision": true,
+      "aggregation": "max",
+      "rationale": "Forcing evasive action during entry into traffic creates a high-risk conflict that can directly precipitate a crash, so the worst unsafe merge or crossing event should dominate."
+    },
+    {
+      "rule": "The driver yields before turning left across the path of an oncoming vehicle, bicyclist, or pedestrian when the gap is too small for safe completion.",
+      "category": "right_of_way",
+      "severity": 5,
+      "involves_collision": true,
+      "aggregation": "max",
+      "rationale": "Unsafe left turns across opposing or crossing traffic are among the most dangerous urban conflicts, so one insufficient-gap event is enough to mark the trajectory."
+    },
+    {
+      "rule": "The driver yields before turning right when a pedestrian, bicyclist, or motorcyclist is in or dangerously near the turning path.",
+      "category": "pedestrian_cyclist_safety",
+      "severity": 5,
+      "involves_collision": true,
+      "aggregation": "max",
+      "rationale": "Failing to yield in a right-turn conflict can directly strike a vulnerable road user, making the most severe single encroachment the appropriate score."
+    },
+    {
+      "rule": "The driver yields to traffic already circulating in a roundabout and enters only when a safe gap exists.",
+      "category": "right_of_way",
+      "severity": 4,
+      "involves_collision": true,
+      "aggregation": "max",
+      "rationale": "An unsafe roundabout entry can create severe side-impact or merge collisions, so evaluation should focus on whether any single entry occurred with an unsafe gap."
+    },
+    {
+      "rule": "The driver does not enter an intersection or conflicting area unless there is enough downstream space to clear it without stopping in conflict.",
+      "category": "right_of_way",
+      "severity": 3,
+      "involves_collision": true,
+      "aggregation": "max",
+      "rationale": "Entering without exit space can trap the ego in conflict zones and create moderate-to-severe crash exposure, with the worst blocked-entry event being most important."
+    },
+    {
+      "rule": "The driver stays entirely within the drivable region and does not let any part of the ego footprint leave the roadway.",
+      "category": "lane_discipline",
+      "severity": 3,
+      "involves_collision": false,
+      "aggregation": "max",
+      "rationale": "Leaving the drivable region is a significant control and roadway-discipline failure that can lead to damage or secondary conflict, and the worst geometric excursion should determine score."
+    },
+    {
+      "rule": "The driver travels in a lane whose direction matches the ego heading and does not proceed in an incorrect-direction lane.",
+      "category": "lane_discipline",
+      "severity": 5,
+      "involves_collision": true,
+      "aggregation": "max",
+      "rationale": "Travel in an incorrect-direction lane creates extreme head-on conflict potential, so any single wrong-direction incursion should be captured by the maximum violation."
+    },
+    {
+      "rule": "The driver keeps to the correct side of the road and does not drive into opposing traffic lanes except when a lawful maneuver is geometrically necessary.",
+      "category": "lane_discipline",
+      "severity": 5,
+      "involves_collision": true,
+      "aggregation": "max",
+      "rationale": "Encroaching into opposing traffic lanes exposes the ego to catastrophic closing-speed collisions, so the largest single encroachment is the critical measure."
+    },
+    {
+      "rule": "The driver maintains lane discipline and does not straddle multiple lanes without committing to a lane change.",
+      "category": "lane_discipline",
+      "severity": 2,
+      "involves_collision": false,
+      "aggregation": "sum",
+      "rationale": "Uncommitted lane straddling is usually a lower-severity but sustained roadway-discipline problem, so cumulative duration better captures repeated or prolonged misuse."
+    },
+    {
+      "rule": "The driver performs lane changes only when adjacent-lane clearance and relative motion make the maneuver safe.",
+      "category": "lane_discipline",
+      "severity": 4,
+      "involves_collision": true,
+      "aggregation": "max",
+      "rationale": "Unsafe lane changes can directly cause side-swipe or cut-off collisions, and one worst unsafe maneuver is sufficient for trajectory-level assessment."
+    },
+    {
+      "rule": "The driver completes a lane change smoothly, without abrupt lateral motion or cutting in with insufficient longitudinal gap.",
+      "category": "lane_discipline",
+      "severity": 3,
+      "involves_collision": true,
+      "aggregation": "max",
+      "rationale": "Abrupt or tight-gap lane changes create moderate crash risk and instability, so the most hazardous completed lane change should dominate scoring."
+    },
+    {
+      "rule": "The driver stays reasonably centered within the current lane when not intentionally changing lanes or navigating an intersection.",
+      "category": "lane_discipline",
+      "severity": 1,
+      "involves_collision": false,
+      "aggregation": "sum",
+      "rationale": "Poor lane centering mainly reflects comfort and lane-keeping quality rather than immediate harm, so accumulated deviation over time is the right measure."
+    },
+    {
+      "rule": "The driver does not weave repeatedly across lanes or make unnecessary successive lane changes.",
+      "category": "lane_discipline",
+      "severity": 2,
+      "involves_collision": false,
+      "aggregation": "sum",
+      "rationale": "Repeated weaving is generally a cumulative instability and traffic-quality issue whose risk grows with frequency and duration, making summed violations appropriate."
+    },
+    {
+      "rule": "The driver enters and exits lanes only through geometrically permitted openings and does not cross lane barriers that should not be crossed.",
+      "category": "lane_discipline",
+      "severity": 3,
+      "involves_collision": true,
+      "aggregation": "max",
+      "rationale": "Crossing prohibited lane barriers can create sudden conflicts and major road-rule violations, so the worst barrier-crossing event should determine the score."
+    },
+    {
+      "rule": "The driver uses the proper lane for a turn and does not begin a turn from a lane inconsistent with the road geometry.",
+      "category": "lane_discipline",
+      "severity": 3,
+      "involves_collision": true,
+      "aggregation": "max",
+      "rationale": "Starting a turn from an incompatible lane can cut across adjacent traffic and produce moderate crash risk, so one worst improper-turn initiation is sufficient."
+    },
+    {
+      "rule": "The driver completes a right turn into the nearest appropriate lane and does not swing wide into an adjacent lane.",
+      "category": "lane_discipline",
+      "severity": 2,
+      "involves_collision": true,
+      "aggregation": "max",
+      "rationale": "A wide right turn can interfere with adjacent traffic or cyclists but is usually less severe than head-on conflicts, so the maximum single bad turn is appropriate."
+    },
+    {
+      "rule": "The driver completes a left turn without encroaching into an opposing lane more than necessary and ends in a compatible destination lane.",
+      "category": "lane_discipline",
+      "severity": 3,
+      "involves_collision": true,
+      "aggregation": "max",
+      "rationale": "Poor left-turn lane placement can place the ego into opposing or incompatible traffic paths, so the worst single turn-path encroachment should dominate."
+    },
+    {
+      "rule": "The driver does not drive the wrong way within a one-way or otherwise direction-constrained roadway segment.",
+      "category": "lane_discipline",
+      "severity": 5,
+      "involves_collision": true,
+      "aggregation": "max",
+      "rationale": "Wrong-way travel on a direction-constrained segment creates severe head-on collision potential, so any occurrence should be reflected by the maximum score."
+    },
+    {
+      "rule": "The driver obeys the applicable lane speed limit whenever a speed limit is available for the ego\u2019s current lane.",
+      "category": "speed_control",
+      "severity": 2,
+      "involves_collision": false,
+      "aggregation": "sum",
+      "rationale": "Speed-limit noncompliance is primarily a procedural and cumulative speed-control issue unless it manifests in other conflict rules, so duration and magnitude should accumulate over time."
+    },
+    {
+      "rule": "The driver does not travel too fast for local geometry and conflict conditions, including curves, intersections, merges, and dense traffic.",
+      "category": "speed_control",
+      "severity": 4,
+      "involves_collision": true,
+      "aggregation": "max",
+      "rationale": "Excess speed relative to geometry or nearby conflict sharply elevates crash probability and injury severity, so the worst contextually unsafe speed should dominate."
+    },
+    {
+      "rule": "The driver does not impede traffic by traveling substantially slower than surrounding traffic without a geometric reason.",
+      "category": "speed_control",
+      "severity": 1,
+      "involves_collision": false,
+      "aggregation": "sum",
+      "rationale": "Unnecessarily slow travel mainly disrupts flow and can be sustained or repeated, so cumulative shortfall over time is the best aggregate."
+    },
+    {
+      "rule": "The driver maintains a safe following distance behind a lead vehicle, expressed as distance or time headway shortfall.",
+      "category": "following_distance",
+      "severity": 3,
+      "involves_collision": true,
+      "aggregation": "sum",
+      "rationale": "Tailgating creates meaningful rear-end crash risk that persists over time, so cumulative headway shortfall captures both severity and duration."
+    },
+    {
+      "rule": "The driver does not cut in front of another vehicle with an unsafe post-merge headway.",
+      "category": "following_distance",
+      "severity": 4,
+      "involves_collision": true,
+      "aggregation": "max",
+      "rationale": "An unsafe cut-in can immediately force hard braking and cause a rear-end collision, so the worst single post-merge headway event is the key signal."
+    },
+    {
+      "rule": "The driver leaves adequate lateral clearance when passing a bicyclist, with violation severity based on the shortfall below three feet.",
+      "category": "pedestrian_cyclist_safety",
+      "severity": 5,
+      "involves_collision": true,
+      "aggregation": "max",
+      "rationale": "Insufficient bicycle passing clearance can directly produce a high-severity collision with a vulnerable road user, so the minimum-clearance event should dominate."
+    },
+    {
+      "rule": "The driver does not pass a bicyclist, pedestrian, or other vulnerable road user with unreasonably small lateral clearance even when lane boundaries are ambiguous.",
+      "category": "pedestrian_cyclist_safety",
+      "severity": 5,
+      "involves_collision": true,
+      "aggregation": "max",
+      "rationale": "Close passing of vulnerable road users creates immediate severe injury risk independent of lane markings, so the worst single clearance shortfall is decisive."
+    },
+    {
+      "rule": "The driver does not overtake or pass another vehicle when oncoming conflict geometry leaves insufficient space or time to return safely.",
+      "category": "collision_avoidance",
+      "severity": 5,
+      "involves_collision": true,
+      "aggregation": "max",
+      "rationale": "Unsafe overtaking with oncoming conflict can lead to catastrophic closing-speed crashes, so a single worst passing event should set the trajectory score."
+    },
+    {
+      "rule": "The driver does not drive directly alongside another vehicle for an extended time when avoidable and when lateral separation is small.",
+      "category": "other",
+      "severity": 2,
+      "involves_collision": true,
+      "aggregation": "sum",
+      "rationale": "Prolonged side-by-side travel at small separation is a moderate sustained hazard that grows with time exposed, making cumulative scoring appropriate."
+    },
+    {
+      "rule": "The driver leaves enough space around large vehicles and does not merge directly in front of them with inadequate stopping margin.",
+      "category": "following_distance",
+      "severity": 4,
+      "involves_collision": true,
+      "aggregation": "max",
+      "rationale": "Cutting closely in front of a large vehicle creates high stopping-distance risk and severe potential impact, so the worst inadequate-margin event should dominate."
+    },
+    {
+      "rule": "The driver avoids sustained occupation of another vehicle\u2019s blind-spot region when close lateral proximity and matched longitudinal position make the situation hazardous.",
+      "category": "other",
+      "severity": 2,
+      "involves_collision": true,
+      "aggregation": "sum",
+      "rationale": "Blind-spot occupation is a time-exposure hazard rather than a momentary discrete event, so cumulative duration in the hazardous region is most informative."
+    },
+    {
+      "rule": "The driver does not approach a stationary or slow actor so quickly that the remaining stopping distance becomes insufficient.",
+      "category": "collision_avoidance",
+      "severity": 4,
+      "involves_collision": true,
+      "aggregation": "max",
+      "rationale": "Insufficient stopping distance to a slow or stopped actor is an acute pre-crash condition with serious injury potential, so the worst such approach should determine score."
+    },
+    {
+      "rule": "The driver avoids excessive longitudinal acceleration that would indicate harsh or uncomfortable driving.",
+      "category": "other",
+      "severity": 1,
+      "involves_collision": false,
+      "aggregation": "sum",
+      "rationale": "Harsh acceleration is mainly a comfort and ride-quality issue that can recur over time, so cumulative excess is the appropriate aggregate."
+    },
+    {
+      "rule": "The driver avoids excessive braking deceleration that would indicate harsh or emergency braking beyond what the situation requires.",
+      "category": "other",
+      "severity": 2,
+      "involves_collision": false,
+      "aggregation": "sum",
+      "rationale": "Excessive braking reflects discomfort and possible instability with somewhat greater risk than harsh acceleration, and repeated episodes should accumulate."
+    },
+    {
+      "rule": "The driver avoids excessive jerk and therefore does not make abrupt changes in acceleration that create discomfort or instability.",
+      "category": "other",
+      "severity": 1,
+      "involves_collision": false,
+      "aggregation": "sum",
+      "rationale": "High jerk primarily captures cumulative ride discomfort and control roughness, so repeated or sustained abruptness should be summed over the trajectory."
+    },
+    {
+      "rule": "The driver avoids excessive lateral acceleration in turns and lane changes.",
+      "category": "other",
+      "severity": 2,
+      "involves_collision": false,
+      "aggregation": "sum",
+      "rationale": "Excessive lateral acceleration indicates uncomfortable or potentially unstable maneuvering that may persist through a maneuver, so cumulative excess is suitable."
+    },
+    {
+      "rule": "The driver avoids combined high curvature and speed that produce uncomfortable or unstable cornering.",
+      "category": "speed_control",
+      "severity": 2,
+      "involves_collision": false,
+      "aggregation": "sum",
+      "rationale": "Unsafe speed-curvature combination reflects sustained maneuver quality and stability concerns rather than a single discrete procedural event, so summed excess is appropriate."
+    },
+    {
+      "rule": "The driver slows appropriately when negotiating a turn, merge, roundabout, or other constrained geometry so the maneuver remains smooth and controlled.",
+      "category": "speed_control",
+      "severity": 3,
+      "involves_collision": true,
+      "aggregation": "max",
+      "rationale": "Failure to reduce speed for constrained geometry can create direct loss-of-control or conflict risk, so the worst underslowed maneuver should dominate scoring."
+    },
+    {
+      "rule": "The driver does not stop in a travel lane or conflict area when a safe continuation was available and surrounding actors make the stop hazardous.",
+      "category": "other",
+      "severity": 3,
+      "involves_collision": true,
+      "aggregation": "sum",
+      "rationale": "Hazardous unnecessary stopping can expose the ego to rear-end or crossing conflicts and is often meaningful in proportion to how long it persists, so duration should accumulate."
+    },
+    {
+      "rule": "The driver, when passing a stopped or slow vulnerable road user nearby, reduces speed enough that low clearance is not compounded by high closing speed.",
+      "category": "pedestrian_cyclist_safety",
+      "severity": 4,
+      "involves_collision": true,
+      "aggregation": "max",
+      "rationale": "Combining small clearance with high passing speed substantially worsens injury risk to vulnerable road users, so the worst pass should set the score."
+    },
+    {
+      "rule": "The driver maintains extra caution near pedestrians by reducing speed and preserving a protective buffer when a pedestrian is near the ego path.",
+      "category": "pedestrian_cyclist_safety",
+      "severity": 5,
+      "involves_collision": true,
+      "aggregation": "max",
+      "rationale": "Pedestrians are highly vulnerable and inadequate buffer or speed near the ego path can quickly become life-threatening, so the worst exposure event should dominate."
+    },
+    {
+      "rule": "The driver maintains extra caution near bicyclists by reducing speed and preserving a protective buffer when a bicyclist is near the ego path.",
+      "category": "pedestrian_cyclist_safety",
+      "severity": 4,
+      "involves_collision": true,
+      "aggregation": "max",
+      "rationale": "Cyclists are vulnerable and insufficient buffer combined with speed creates serious crash risk, so the maximum single hazardous proximity event is most relevant."
+    },
+    {
+      "rule": "The driver does not create a near-collision during any merge, turn, pass, or lane change, even if contact is ultimately avoided.",
+      "category": "collision_avoidance",
+      "severity": 4,
+      "involves_collision": true,
+      "aggregation": "max",
+      "rationale": "A near-collision indicates a severe conflict narrowly short of impact, so the worst single near-miss event should dominate trajectory evaluation."
+    },
+    {
+      "rule": "The driver does not remain in an intersection or junction conflict zone long enough to obstruct cross traffic or expose the vehicle to avoidable conflict.",
+      "category": "right_of_way",
+      "severity": 3,
+      "involves_collision": true,
+      "aggregation": "sum",
+      "rationale": "Prolonged occupation of a conflict zone increases both obstruction and exposure risk in proportion to time spent there, so cumulative duration is the right aggregate."
+    },
+    {
+      "rule": "The driver does not reverse or otherwise move contrary to lane direction in a live lane when surrounding traffic makes the maneuver hazardous.",
+      "category": "lane_discipline",
+      "severity": 4,
+      "involves_collision": true,
+      "aggregation": "max",
+      "rationale": "Reversing or moving against lane direction in active traffic creates severe unexpected conflict potential, so the worst hazardous contrary-motion event should determine the score."
+    }
+  ],
+  "hierarchy": {
+    "tiers": [
+      {
+        "tier": 1,
+        "name": "Catastrophic harm prevention: protect human life, especially VRUs",
+        "description": "Rules in this tier address the most direct risk of death or life-changing injury. They cover actual collisions, imminent collision states, and the highest-severity conflict geometries. Within this tier, pedestrian and bicyclist protection is treated as higher moral priority than motor-vehicle occupant protection because vulnerable road users lack structural protection.",
+        "rules": [
+          "The driver does not allow the ego vehicle to collide with any vehicle, pedestrian, or bicyclist.",
+          "The driver yields before turning right when a pedestrian, bicyclist, or motorcyclist is in or dangerously near the turning path.",
+          "The driver leaves adequate lateral clearance when passing a bicyclist, with violation severity based on the shortfall below three feet.",
+          "The driver does not pass a bicyclist, pedestrian, or other vulnerable road user with unreasonably small lateral clearance even when lane boundaries are ambiguous.",
+          "The driver maintains extra caution near pedestrians by reducing speed and preserving a protective buffer when a pedestrian is near the ego path.",
+          "The driver yields before turning left across the path of an oncoming vehicle, bicyclist, or pedestrian when the gap is too small for safe completion.",
+          "The driver does not overtake or pass another vehicle when oncoming conflict geometry leaves insufficient space or time to return safely.",
+          "The driver travels in a lane whose direction matches the ego heading and does not proceed in an incorrect-direction lane.",
+          "The driver keeps to the correct side of the road and does not drive into opposing traffic lanes except when a lawful maneuver is geometrically necessary.",
+          "The driver does not drive the wrong way within a one-way or otherwise direction-constrained roadway segment.",
+          "The driver maintains enough time-to-collision and stopping margin to avoid imminent conflict with any vehicle, pedestrian, or bicyclist ahead or on a crossing path.",
+          "The driver does not create a near-collision during any merge, turn, pass, or lane change, even if contact is ultimately avoided."
+        ],
+        "ethical_reasoning": "These rules dominate because they most directly separate survivable outcomes from potentially fatal ones. A benchmark intended to express harm tradeoffs must put avoided death and severe trauma ahead of all procedural, comfort, or flow considerations. VRU-focused rules sit at the very top of this tier because a similar geometric conflict usually carries greater injury risk for a pedestrian or bicyclist than for protected occupants in another vehicle."
+      },
+      {
+        "tier": 2,
+        "name": "Serious injury risk reduction: high-severity conflict prevention",
+        "description": "This tier covers situations that may not yet be actual collision or near-collision events but strongly create severe crash potential: unsafe entries, unsafe lane changes, unsafe speed in conflict-rich settings, and inadequate margins around large or vulnerable actors.",
+        "rules": [
+          "The driver yields when entering a lane, merging, or crossing into traffic and does not force another road user to brake sharply or take evasive action.",
+          "The driver yields to traffic already circulating in a roundabout and enters only when a safe gap exists.",
+          "The driver performs lane changes only when adjacent-lane clearance and relative motion make the maneuver safe.",
+          "The driver does not cut in front of another vehicle with an unsafe post-merge headway.",
+          "The driver leaves enough space around large vehicles and does not merge directly in front of them with inadequate stopping margin.",
+          "The driver does not approach a stationary or slow actor so quickly that the remaining stopping distance becomes insufficient.",
+          "The driver does not travel too fast for local geometry and conflict conditions, including curves, intersections, merges, and dense traffic.",
+          "The driver slows appropriately when negotiating a turn, merge, roundabout, or other constrained geometry so the maneuver remains smooth and controlled.",
+          "The driver, when passing a stopped or slow vulnerable road user nearby, reduces speed enough that low clearance is not compounded by high closing speed.",
+          "The driver maintains extra caution near bicyclists by reducing speed and preserving a protective buffer when a bicyclist is near the ego path.",
+          "The driver does not reverse or otherwise move contrary to lane direction in a live lane when surrounding traffic makes the maneuver hazardous."
+        ],
+        "ethical_reasoning": "These rules aim to prevent situations with substantial probability of severe injury, but which are one step removed from the absolute top tier because they often remain recoverable if margins improve. They still outweigh ordinary rule compliance because the likely consequence of failure is a major crash rather than merely inefficiency or discomfort."
+      },
+      {
+        "tier": 3,
+        "name": "Moderate injury / significant property-damage prevention",
+        "description": "This tier includes rules whose violations can produce crashes or dangerous obstruction, but are typically lower-energy, more context-dependent, or less directly catastrophic than tiers 1\u20132. They also include roadway-boundary and maneuver-correctness constraints that often prevent secondary conflicts.",
+        "rules": [
+          "The driver does not enter an intersection or conflicting area unless there is enough downstream space to clear it without stopping in conflict.",
+          "The driver stays entirely within the drivable region and does not let any part of the ego footprint leave the roadway.",
+          "The driver completes a lane change smoothly, without abrupt lateral motion or cutting in with insufficient longitudinal gap.",
+          "The driver enters and exits lanes only through geometrically permitted openings and does not cross lane barriers that should not be crossed.",
+          "The driver uses the proper lane for a turn and does not begin a turn from a lane inconsistent with the road geometry.",
+          "The driver completes a left turn without encroaching into an opposing lane more than necessary and ends in a compatible destination lane.",
+          "The driver maintains a safe following distance behind a lead vehicle, expressed as distance or time headway shortfall.",
+          "The driver does not stop in a travel lane or conflict area when a safe continuation was available and surrounding actors make the stop hazardous.",
+          "The driver does not remain in an intersection or junction conflict zone long enough to obstruct cross traffic or expose the vehicle to avoidable conflict."
+        ],
+        "ethical_reasoning": "Violations here create meaningful crash exposure or moderate harm, but usually with lower closing speeds, more time for correction, or a stronger link to property damage and obstruction than to immediate fatality. They matter, but should yield to rules preventing more serious injury."
+      },
+      {
+        "tier": 4,
+        "name": "Low-severity collision risk, procedural roadway compliance, and stability",
+        "description": "This tier captures rules whose main role is preventing minor collisions, maintaining order, and discouraging hazardous but generally less severe exposure states. These rules improve predictability and reduce nuisance risk but should give way when stronger safety priorities require deviation.",
+        "rules": [
+          "The driver maintains lane discipline and does not straddle multiple lanes without committing to a lane change.",
+          "The driver does not weave repeatedly across lanes or make unnecessary successive lane changes.",
+          "The driver completes a right turn into the nearest appropriate lane and does not swing wide into an adjacent lane.",
+          "The driver obeys the applicable lane speed limit whenever a speed limit is available for the ego\u2019s current lane.",
+          "The driver does not drive directly alongside another vehicle for an extended time when avoidable and when lateral separation is small.",
+          "The driver avoids sustained occupation of another vehicle\u2019s blind-spot region when close lateral proximity and matched longitudinal position make the situation hazardous.",
+          "The driver avoids excessive braking deceleration that would indicate harsh or emergency braking beyond what the situation requires.",
+          "The driver avoids excessive lateral acceleration in turns and lane changes.",
+          "The driver avoids combined high curvature and speed that produce uncomfortable or unstable cornering."
+        ],
+        "ethical_reasoning": "These rules primarily target lower-energy conflicts, procedural compliance, and maneuver stability. They are important for safe integration with traffic, but they should not override actions needed to avoid more serious injury outcomes."
+      },
+      {
+        "tier": 5,
+        "name": "Traffic flow, comfort, and ride quality",
+        "description": "Lowest-priority rules concern efficiency, passenger comfort, and fine lane-keeping quality. They are still useful for ranking trajectories, especially in offline evaluation, but should always defer to safety and serious conflict avoidance.",
+        "rules": [
+          "The driver stays reasonably centered within the current lane when not intentionally changing lanes or navigating an intersection.",
+          "The driver does not impede traffic by traveling substantially slower than surrounding traffic without a geometric reason.",
+          "The driver avoids excessive longitudinal acceleration that would indicate harsh or uncomfortable driving.",
+          "The driver avoids excessive jerk and therefore does not make abrupt changes in acceleration that create discomfort or instability."
+        ],
+        "ethical_reasoning": "These objectives matter only after higher-order safety concerns are satisfied. It is ethically acceptable to sacrifice comfort, neat centering, or traffic flow in order to preserve life, avoid serious injury, or prevent collisions."
+      }
+    ],
+    "collision_severity_ordering": [
+      {
+        "collision_type": "Head-on",
+        "severity_rank": 1,
+        "typical_delta_v_kmh": "~50\u2013150+ km/h combined delta-v, often the highest because closing speeds add",
+        "expected_harm": "Most severe. Very high fatality and serious-injury risk for vehicle occupants; catastrophic for pedestrians/bicyclists if involved. Strongly associated with high-energy wrong-way or opposing-lane conflicts."
+      },
+      {
+        "collision_type": "Side-impact / T-bone",
+        "severity_rank": 2,
+        "typical_delta_v_kmh": "~30\u201390 km/h, with severe occupant impact velocity especially at struck-side doors",
+        "expected_harm": "Very severe. High risk of serious injury because lateral crash protection and crush space are limited. Common in intersection, left-turn-across-path, and roundabout entry failures."
+      },
+      {
+        "collision_type": "Fixed-object",
+        "severity_rank": 3,
+        "typical_delta_v_kmh": "~20\u201380+ km/h depending on object rigidity and whether the vehicle decelerates abruptly",
+        "expected_harm": "Severe to very severe when the object is rigid and impact is concentrated. Often lower societal harm than striking a VRU, but can produce major occupant injury, especially at speed or with narrow-object impacts."
+      },
+      {
+        "collision_type": "Rear-end",
+        "severity_rank": 4,
+        "typical_delta_v_kmh": "~10\u201350 km/h closing delta-v, sometimes higher in high-speed following failures",
+        "expected_harm": "Moderate on average, though serious injury is possible at higher closing speeds or when large vehicles are involved. Frequently less injurious than head-on or struck-side impacts because travel directions are aligned."
+      },
+      {
+        "collision_type": "Sideswipe",
+        "severity_rank": 5,
+        "typical_delta_v_kmh": "~5\u201330 km/h lateral/relative delta-v",
+        "expected_harm": "Usually minor to moderate property damage and occasional injury. Risk rises if it destabilizes a vehicle into secondary collisions, barriers, or VRUs."
+      },
+      {
+        "collision_type": "Low-speed contact / scrape",
+        "severity_rank": 6,
+        "typical_delta_v_kmh": "~0\u201310 km/h",
+        "expected_harm": "Lowest severity. Typically property damage or negligible injury, though still unacceptable around VRUs because even low-speed contact can injure a pedestrian or bicyclist."
+      }
+    ],
+    "pairwise_priority_edges": [
+      {
+        "higher_priority_rule": "The driver does not allow the ego vehicle to collide with any vehicle, pedestrian, or bicyclist.",
+        "lower_priority_rule": "The driver stays entirely within the drivable region and does not let any part of the ego footprint leave the roadway.",
+        "conflict_scenario": "Ego can avoid striking a pedestrian or bicyclist only by partially leaving the drivable region onto a shoulder-like area represented outside the mapped drivable polygon.",
+        "justification": "Leaving the drivable region is a serious procedural and control failure, but it is ethically preferable to a human-impact collision."
+      },
+      {
+        "higher_priority_rule": "The driver does not allow the ego vehicle to collide with any vehicle, pedestrian, or bicyclist.",
+        "lower_priority_rule": "The driver avoids excessive braking deceleration that would indicate harsh or emergency braking beyond what the situation requires.",
+        "conflict_scenario": "A child-sized pedestrian actor or abrupt lead-vehicle stop appears in the realized trajectory, and avoiding impact requires braking harder than the comfort rule allows.",
+        "justification": "Emergency discomfort is acceptable to avoid collision."
+      },
+      {
+        "higher_priority_rule": "The driver maintains enough time-to-collision and stopping margin to avoid imminent conflict with any vehicle, pedestrian, or bicyclist ahead or on a crossing path.",
+        "lower_priority_rule": "The driver does not impede traffic by traveling substantially slower than surrounding traffic without a geometric reason.",
+        "conflict_scenario": "Dense traffic or a crossing pedestrian near the ego path makes preserving TTC possible only by slowing well below surrounding traffic speed.",
+        "justification": "Short-term traffic impedance is justified to maintain crash margin."
+      },
+      {
+        "higher_priority_rule": "The driver maintains extra caution near pedestrians by reducing speed and preserving a protective buffer when a pedestrian is near the ego path.",
+        "lower_priority_rule": "The driver obeys the applicable lane speed limit whenever a speed limit is available for the ego\u2019s current lane.",
+        "conflict_scenario": "The lane speed limit would permit a higher speed, but a pedestrian walking close to the ego path makes that speed unsafe.",
+        "justification": "Context-sensitive pedestrian protection should override nominal speed-limit compliance when the posted limit is not sufficiently protective in the realized scene."
+      },
+      {
+        "higher_priority_rule": "The driver yields before turning right when a pedestrian, bicyclist, or motorcyclist is in or dangerously near the turning path.",
+        "lower_priority_rule": "The driver does not stop in a travel lane or conflict area when a safe continuation was available and surrounding actors make the stop hazardous.",
+        "conflict_scenario": "While preparing a right turn, the ego must stop and wait in order not to cut across a pedestrian or bicyclist near the turn path.",
+        "justification": "Temporary stopping inconvenience or rear-end exposure is lower priority than avoiding a VRU strike."
+      },
+      {
+        "higher_priority_rule": "The driver yields before turning left across the path of an oncoming vehicle, bicyclist, or pedestrian when the gap is too small for safe completion.",
+        "lower_priority_rule": "The driver does not remain in an intersection or junction conflict zone long enough to obstruct cross traffic or expose the vehicle to avoidable conflict.",
+        "conflict_scenario": "Ego has edged into the junction but should continue waiting rather than complete a left turn across an unsafe oncoming gap.",
+        "justification": "Obstruction risk is lower priority than a potentially catastrophic left-turn-across-path crash."
+      },
+      {
+        "higher_priority_rule": "The driver does not overtake or pass another vehicle when oncoming conflict geometry leaves insufficient space or time to return safely.",
+        "lower_priority_rule": "The driver does not impede traffic by traveling substantially slower than surrounding traffic without a geometric reason.",
+        "conflict_scenario": "A slow lead vehicle encourages overtaking, but oncoming geometry leaves inadequate return space.",
+        "justification": "Traffic delay is acceptable; head-on conflict risk is not."
+      },
+      {
+        "higher_priority_rule": "The driver leaves adequate lateral clearance when passing a bicyclist, with violation severity based on the shortfall below three feet.",
+        "lower_priority_rule": "The driver travels in a lane whose direction matches the ego heading and does not proceed in an incorrect-direction lane.",
+        "conflict_scenario": "Passing a bicyclist safely may require a slight temporary encroachment beyond the ideal lane path; however, full wrong-way travel would still be disallowed unless truly necessary and limited.",
+        "justification": "Within lane-discipline constraints, protecting a bicyclist from close pass harm takes priority over perfect lane conformity. This edge is about narrow, necessary deviation, not sustained wrong-way driving."
+      },
+      {
+        "higher_priority_rule": "The driver does not pass a bicyclist, pedestrian, or other vulnerable road user with unreasonably small lateral clearance even when lane boundaries are ambiguous.",
+        "lower_priority_rule": "The driver stays reasonably centered within the current lane when not intentionally changing lanes or navigating an intersection.",
+        "conflict_scenario": "Maintaining safer VRU clearance requires shifting away from lane center within the current lane.",
+        "justification": "Lane-centering is a comfort/quality metric and should yield to VRU protection."
+      },
+      {
+        "higher_priority_rule": "The driver performs lane changes only when adjacent-lane clearance and relative motion make the maneuver safe.",
+        "lower_priority_rule": "The driver avoids sustained occupation of another vehicle\u2019s blind-spot region when close lateral proximity and matched longitudinal position make the situation hazardous.",
+        "conflict_scenario": "The ego could leave a blind spot only by making an unsafe immediate lane change into a poorly cleared adjacent lane.",
+        "justification": "It is better to remain briefly in a blind-spot exposure state than to force an unsafe lane change that creates acute collision risk."
+      },
+      {
+        "higher_priority_rule": "The driver yields when entering a lane, merging, or crossing into traffic and does not force another road user to brake sharply or take evasive action.",
+        "lower_priority_rule": "The driver does not impede traffic by traveling substantially slower than surrounding traffic without a geometric reason.",
+        "conflict_scenario": "At a merge, ego must wait or enter very slowly to avoid forcing mainline traffic to brake hard.",
+        "justification": "Safe yielding at entry outranks maintaining flow."
+      },
+      {
+        "higher_priority_rule": "The driver yields to traffic already circulating in a roundabout and enters only when a safe gap exists.",
+        "lower_priority_rule": "The driver does not stop in a travel lane or conflict area when a safe continuation was available and surrounding actors make the stop hazardous.",
+        "conflict_scenario": "Ego pauses before roundabout entry because circulating traffic leaves no safe gap.",
+        "justification": "Roundabout right-of-way and side-impact avoidance outrank pressure to keep moving."
+      },
+      {
+        "higher_priority_rule": "The driver does not approach a stationary or slow actor so quickly that the remaining stopping distance becomes insufficient.",
+        "lower_priority_rule": "The driver avoids excessive longitudinal acceleration that would indicate harsh or uncomfortable driving.",
+        "conflict_scenario": "To restore safe stopping margin after a prior speed buildup, the ego must aggressively reduce throttle or brake, producing discomfort.",
+        "justification": "Collision margin restoration outweighs comfort."
+      },
+      {
+        "higher_priority_rule": "The driver does not travel too fast for local geometry and conflict conditions, including curves, intersections, merges, and dense traffic.",
+        "lower_priority_rule": "The driver obeys the applicable lane speed limit whenever a speed limit is available for the ego\u2019s current lane.",
+        "conflict_scenario": "The posted limit is higher than what is safe for a sharp curve, active merge, or crowded intersection in the realized trajectory.",
+        "justification": "Contextual safe speed is more protective than formal limit tracking."
+      },
+      {
+        "higher_priority_rule": "The driver slows appropriately when negotiating a turn, merge, roundabout, or other constrained geometry so the maneuver remains smooth and controlled.",
+        "lower_priority_rule": "The driver does not impede traffic by traveling substantially slower than surrounding traffic without a geometric reason.",
+        "conflict_scenario": "Safe negotiation of a roundabout or tight turn requires a lower speed than vehicles behind might prefer.",
+        "justification": "Controlled maneuvering outranks flow efficiency."
+      },
+      {
+        "higher_priority_rule": "The driver leaves enough space around large vehicles and does not merge directly in front of them with inadequate stopping margin.",
+        "lower_priority_rule": "The driver completes a lane change smoothly, without abrupt lateral motion or cutting in with insufficient longitudinal gap.",
+        "conflict_scenario": "A planned lane change cannot be completed smoothly without ending too close in front of a truck; delaying or aborting the maneuver may be less smooth overall.",
+        "justification": "Avoiding a high-severity truck-related stopping-margin hazard outranks aesthetic smoothness of lane-change completion."
+      },
+      {
+        "higher_priority_rule": "The driver maintains a safe following distance behind a lead vehicle, expressed as distance or time headway shortfall.",
+        "lower_priority_rule": "The driver obeys the applicable lane speed limit whenever a speed limit is available for the ego\u2019s current lane.",
+        "conflict_scenario": "Maintaining safe headway behind a slower lead vehicle requires traveling below the posted limit.",
+        "justification": "Headway safety outranks achieving the nominal legal maximum speed."
+      },
+      {
+        "higher_priority_rule": "The driver does not create a near-collision during any merge, turn, pass, or lane change, even if contact is ultimately avoided.",
+        "lower_priority_rule": "The driver maintains lane discipline and does not straddle multiple lanes without committing to a lane change.",
+        "conflict_scenario": "Ego briefly straddles lanes while aborting a lane change to avoid a near-collision with a fast-approaching adjacent vehicle.",
+        "justification": "A transient lane-discipline violation is preferable to an acute near-impact event."
+      },
+      {
+        "higher_priority_rule": "The driver does not drive directly alongside another vehicle for an extended time when avoidable and when lateral separation is small.",
+        "lower_priority_rule": "The driver stays reasonably centered within the current lane when not intentionally changing lanes or navigating an intersection.",
+        "conflict_scenario": "Increasing lateral separation from an adjacent vehicle requires modest in-lane offset from lane center.",
+        "justification": "Reducing small-separation side-by-side exposure is more important than perfect centering."
+      },
+      {
+        "higher_priority_rule": "The driver does not reverse or otherwise move contrary to lane direction in a live lane when surrounding traffic makes the maneuver hazardous.",
+        "lower_priority_rule": "The driver does not remain in an intersection or junction conflict zone long enough to obstruct cross traffic or expose the vehicle to avoidable conflict.",
+        "conflict_scenario": "After overshooting a stop position or turn point, reversing out would clear the area sooner but would require hazardous contrary motion in a live lane.",
+        "justification": "Hazardous reverse/contrary motion can create severe unexpected conflicts and should not be used merely to reduce obstruction duration."
+      },
+      {
+        "higher_priority_rule": "The driver stays entirely within the drivable region and does not let any part of the ego footprint leave the roadway.",
+        "lower_priority_rule": "The driver stays reasonably centered within the current lane when not intentionally changing lanes or navigating an intersection.",
+        "conflict_scenario": "The ego drifts within the lane and must prioritize keeping the footprint on the roadway even if lane-centering quality suffers.",
+        "justification": "Roadway departure is more serious than poor centering."
+      },
+      {
+        "higher_priority_rule": "The driver uses the proper lane for a turn and does not begin a turn from a lane inconsistent with the road geometry.",
+        "lower_priority_rule": "The driver does not weave repeatedly across lanes or make unnecessary successive lane changes.",
+        "conflict_scenario": "A necessary late but safe lane change is required to reach the correct turn lane.",
+        "justification": "Proper turn-lane selection to avoid downstream conflict outranks a minor cumulative weaving penalty."
+      }
+    ]
+  },
+  "stl_conversions": {
+    "conversions": [
+      {
+        "rule": "The driver does not allow the ego vehicle to collide with any vehicle, pedestrian, or bicyclist.",
+        "category": "collision_avoidance",
+        "stl_formula": "G_[T1,T2](\u2200j \u2208 (A_all \u222a V_all) \u00b7 (p_0(t) \u2229 p_j(t) = \u2205))",
+        "value_semantics": "Per-step violation = \u03a3_{j \u2208 A_all \u222a V_all : p_0(t) \u2229 p_j(t) \u2260 \u2205} E_coll(0,j,t), where E_coll is collision energy loss/gain in Joules (e.g., ego loss + other actor loss). 0 if no overlap. Trajectory aggregation: max."
+      },
+      {
+        "rule": "The driver maintains enough time-to-collision and stopping margin to avoid imminent conflict with any vehicle, pedestrian, or bicyclist ahead or on a crossing path.",
+        "category": "collision_avoidance",
+        "stl_formula": "G_[T1,T2](\u2200j \u2208 (A_all \u222a V_all) \u00b7 ((d_poly(0,j,t) > 0) \u2227 ((d_cent(0,j,t) / max(\u03b5, ||v_0(t)-v_j(t)||)) \u2265 \u03c4_TTC \u2228 d_cent(0,j,t) \u2265 d_stop,0(t))))",
+        "value_semantics": "Per-step violation = max over j of max(0, \u03c4_TTC - d_cent(0,j,t)/max(\u03b5,||v_0(t)-v_j(t)||), d_stop,0(t) - d_cent(0,j,t)), considering only actors with closing relative motion / conflict geometry. Units: seconds shortfall for TTC term and meters shortfall for stopping-margin term; implementations may normalize and take the larger. 0 if safe. Trajectory aggregation: max."
+      },
+      {
+        "rule": "The driver yields when entering a lane, merging, or crossing into traffic and does not force another road user to brake sharply or take evasive action.",
+        "category": "right_of_way",
+        "stl_formula": "G_[T1,T2]((lane(0,t) \u2260 lane(0,t-0.1)) \u2192 \u2200j \u2208 (A_all \u222a V_all) \u00b7 ((d_poly(0,j,t) > 0) \u2227 (d_cent(0,j,t)/max(\u03b5,||v_0(t)-v_j(t)||) \u2265 \u03c4_merge) \u2227 (||a_j(t)|| \u2264 a_evasive)))",
+        "value_semantics": "Per-step violation at lane-entry / merge / crossing moments = max over j of max(0, \u03c4_merge - d_cent(0,j,t)/max(\u03b5,||v_0(t)-v_j(t)||), ||a_j(t)|| - a_evasive). This captures unsafe gap and evidence that another actor had to brake or evade sharply. 0 away from entry/crossing events. Trajectory aggregation: max."
+      },
+      {
+        "rule": "The driver yields before turning left across the path of an oncoming vehicle, bicyclist, or pedestrian when the gap is too small for safe completion.",
+        "category": "right_of_way",
+        "stl_formula": "G_[T1,T2]((\u2203k \u00b7 lane(0,t) = L_k \u2227 L_k is a left-turn maneuver) \u2192 \u2200j \u2208 (A_all \u222a V_all) \u00b7 ((d_poly(0,j,t) > 0) \u2227 (d_cent(0,j,t)/max(\u03b5,||v_0(t)-v_j(t)||) \u2265 \u03c4_left) ))",
+        "value_semantics": "Per-step violation during left-turn approach/execution = max over conflicting j of max(0, \u03c4_left - d_cent(0,j,t)/max(\u03b5,||v_0(t)-v_j(t)||)). Optionally restrict to oncoming/crossing actors by conflict-path geometry using traj_future_0(t). Units: seconds shortfall. Trajectory aggregation: max."
+      },
+      {
+        "rule": "The driver yields before turning right when a pedestrian, bicyclist, or motorcyclist is in or dangerously near the turning path.",
+        "category": "pedestrian_cyclist_safety",
+        "stl_formula": "G_[T1,T2]((\u2203k \u00b7 lane(0,t) = L_k \u2227 L_k is a right-turn maneuver) \u2192 \u2200j \u2208 V_all \u00b7 ((d_poly(0,j,t) > d_safe_VRU) \u2228 (d_cent(0,j,t)/max(\u03b5,||v_0(t)-v_j(t)||) \u2265 \u03c4_right))))",
+        "value_semantics": "Per-step violation during right-turn approach/execution = max over VRUs j of max(0, d_safe_VRU - d_poly(0,j,t), \u03c4_right - d_cent(0,j,t)/max(\u03b5,||v_0(t)-v_j(t)||)). Interpreted as encroaching on a VRU near the turning path with too little clearance or time margin. Trajectory aggregation: max."
+      },
+      {
+        "rule": "The driver yields to traffic already circulating in a roundabout and enters only when a safe gap exists.",
+        "category": "right_of_way",
+        "stl_formula": "G_[T1,T2]((lane(0,t) \u2260 lane(0,t-0.1) \u2227 \u2203k \u00b7 lane(0,t)=L_k \u2227 L_k is within a roundabout-entry geometry) \u2192 \u2200j \u2208 A_all \u00b7 ((d_poly(0,j,t) > 0) \u2227 (d_cent(0,j,t)/max(\u03b5,||v_0(t)-v_j(t)||) \u2265 \u03c4_rdbt)))",
+        "value_semantics": "Per-step violation at roundabout entry = max over circulating/conflicting vehicles j of max(0, \u03c4_rdbt - d_cent(0,j,t)/max(\u03b5,||v_0(t)-v_j(t)||)). 0 otherwise. Trajectory aggregation: max."
+      },
+      {
+        "rule": "The driver does not enter an intersection or conflicting area unless there is enough downstream space to clear it without stopping in conflict.",
+        "category": "right_of_way",
+        "stl_formula": "G_[T1,T2]((p_0(t) enters an intersection polygon) \u2192 F_[0,\u03c4_clear](p_0(t') \u2286 R_driv \u2227 p_0(t') is outside all intersection polygons))",
+        "value_semantics": "Per-step violation when entering an intersection = if ego subsequently stops or remains inside an intersection beyond \u03c4_clear, use occupancy excess duration or blocked-distance shortfall. A concrete score is max(0, residence_time_in_conflict_zone_after_entry - \u03c4_clear) in seconds, or equivalent unmet downstream-clearance distance in meters. Trajectory aggregation: max."
+      },
+      {
+        "rule": "The driver stays entirely within the drivable region and does not let any part of the ego footprint leave the roadway.",
+        "category": "lane_discipline",
+        "stl_formula": "G_[T1,T2](p_0(t) \u2286 R_driv)",
+        "value_semantics": "Per-step violation = area(p_0(t) \\ R_driv) in m^2, optionally plus signed distance shortfall when fully outside. 0 if fully contained. Trajectory aggregation: max."
+      },
+      {
+        "rule": "The driver travels in a lane whose direction matches the ego heading and does not proceed in an incorrect-direction lane.",
+        "category": "lane_discipline",
+        "stl_formula": "G_[T1,T2]((lane(0,t) \u2208 correct_lanes(t)) \u2228 (lane(0,t) is undefined inside an intersection polygon))",
+        "value_semantics": "Per-step violation = area(p_0(t) \u2229 \u22c3 incorrect_lanes(t)) in m^2, or equivalently length/width-weighted footprint overlap with incorrect-direction lanes. 0 when in correct lane or lane assignment is relaxed in intersections. Trajectory aggregation: max."
+      },
+      {
+        "rule": "The driver keeps to the correct side of the road and does not drive into opposing traffic lanes except when a lawful maneuver is geometrically necessary.",
+        "category": "lane_discipline",
+        "stl_formula": "G_[T1,T2]((p_0(t) \u2229 \u22c3 incorrect_lanes(t) = \u2205) \u2228 (\u2203k \u00b7 lane(0,t)=L_k \u2227 L_k is a turning/transition maneuver requiring brief encroachment))",
+        "value_semantics": "Per-step violation = area(p_0(t) \u2229 \u22c3 incorrect_lanes(t)) in m^2 outside maneuver-necessary contexts. 0 if no opposing-lane overlap or overlap is geometrically necessary for the maneuver. Trajectory aggregation: max."
+      },
+      {
+        "rule": "The driver maintains lane discipline and does not straddle multiple lanes without committing to a lane change.",
+        "category": "lane_discipline",
+        "stl_formula": "G_[T1,T2]((p_0(t) overlaps more than one lane polygon) \u2192 F_[0,\u03c4_commit](lane(0,t') \u2260 lane(0,t)))",
+        "value_semantics": "Per-step violation = amount of ego footprint simultaneously overlapping multiple lane polygons after exceeding an allowed commitment window \u03c4_commit; e.g., area of secondary-lane overlap in m^2 or duration beyond \u03c4_commit in seconds. 0 if brief during a committed lane change. Trajectory aggregation: sum."
+      },
+      {
+        "rule": "The driver performs lane changes only when adjacent-lane clearance and relative motion make the maneuver safe.",
+        "category": "lane_discipline",
+        "stl_formula": "G_[T1,T2]((lane(0,t) \u2260 lane(0,t-0.1)) \u2192 \u2200j \u2208 A_all \u00b7 ((d_poly(0,j,t) > d_lc) \u2227 (d_cent(0,j,t)/max(\u03b5,||v_0(t)-v_j(t)||) \u2265 \u03c4_lc)))",
+        "value_semantics": "Per-step violation during lane-change initiation/execution = max over nearby vehicles j of max(0, d_lc - d_poly(0,j,t), \u03c4_lc - d_cent(0,j,t)/max(\u03b5,||v_0(t)-v_j(t)||)). 0 otherwise. Trajectory aggregation: max."
+      },
+      {
+        "rule": "The driver completes a lane change smoothly, without abrupt lateral motion or cutting in with insufficient longitudinal gap.",
+        "category": "lane_discipline",
+        "stl_formula": "G_[T1,T2]((lane(0,t) \u2260 lane(0,t-0.1)) \u2192 ((|a_lat,0(t)| \u2264 a_lat,max) \u2227 \u2200j \u2208 A_all \u00b7 (d_cent(0,j,t)/max(\u03b5,||v_0(t)-v_j(t)||) \u2265 \u03c4_cutin)))",
+        "value_semantics": "Per-step violation during a completed lane change = max(max(0, |a_lat,0(t)| - a_lat,max), max_j max(0, \u03c4_cutin - d_cent(0,j,t)/max(\u03b5,||v_0(t)-v_j(t)||))). Captures abrupt lateral motion and tight cut-in gap. Trajectory aggregation: max."
+      },
+      {
+        "rule": "The driver stays reasonably centered within the current lane when not intentionally changing lanes or navigating an intersection.",
+        "category": "lane_discipline",
+        "stl_formula": "G_[T1,T2](((lane(0,t)=lane(0,t-0.1)) \u2227 p_0(t) outside intersection polygons) \u2192 (d_cent(c_0(t), centerline(lane(0,t))) \u2264 \u03b4_center))",
+        "value_semantics": "Per-step violation = max(0, d_cent(c_0(t), centerline(lane(0,t))) - \u03b4_center) in meters, evaluated only when ego is stably in one lane and not in an intersection. Trajectory aggregation: sum."
+      },
+      {
+        "rule": "The driver does not weave repeatedly across lanes or make unnecessary successive lane changes.",
+        "category": "lane_discipline",
+        "stl_formula": "G_[T1,T2]((lane(0,t) \u2260 lane(0,t-0.1)) \u2192 G_[0,\u03c4_weave](lane(0,t') = lane(0,t)))",
+        "value_semantics": "Per-step violation = count or rate of lane-identity changes occurring within a short horizon \u03c4_weave beyond one committed change; e.g., max(0, N_changes[t-\u03c4_weave,t] - 1). Units: excess lane changes. Trajectory aggregation: sum."
+      },
+      {
+        "rule": "The driver enters and exits lanes only through geometrically permitted openings and does not cross lane barriers that should not be crossed.",
+        "category": "lane_discipline",
+        "stl_formula": "G_[T1,T2]((lane(0,t) \u2260 lane(0,t-0.1)) \u2192 (\u2203 admissible maneuver from lane(0,t-0.1) to lane(0,t)))",
+        "value_semantics": "Per-step violation = boundary-crossing severity when ego transitions between lanes lacking an allowed lane maneuver connection; binary-to-continuous implementation may use overlap/penetration depth into non-connected lane region in meters or m^2. 0 for permitted transitions. Trajectory aggregation: max."
+      },
+      {
+        "rule": "The driver uses the proper lane for a turn and does not begin a turn from a lane inconsistent with the road geometry.",
+        "category": "lane_discipline",
+        "stl_formula": "G_[T1,T2]((ego initiates a turn from lane(0,t)) \u2192 (lane(0,t) has a lane maneuver compatible with the realized turn in traj_future_0(t)))",
+        "value_semantics": "Per-step violation at turn initiation = incompatibility score between realized turn and lane maneuver set; continuous implementation may use 1 for incompatible turn lane, or geometric deviation into non-permitted turn corridor measured as overlap area with incompatible destination lanes (m^2). Trajectory aggregation: max."
+      },
+      {
+        "rule": "The driver completes a right turn into the nearest appropriate lane and does not swing wide into an adjacent lane.",
+        "category": "lane_discipline",
+        "stl_formula": "G_[T1,T2]((ego performs a right turn) \u2192 F_[0,\u03c4_turn](lane(0,t') \u2208 nearest compatible destination lanes for that right turn))",
+        "value_semantics": "Per-step violation during/after right turn = overlap area of p_0(t) with non-nearest adjacent destination lane polygons, or lateral offset from nearest compatible destination lane centerline at turn completion. 0 if the right turn terminates in nearest appropriate lane. Trajectory aggregation: max."
+      },
+      {
+        "rule": "The driver completes a left turn without encroaching into an opposing lane more than necessary and ends in a compatible destination lane.",
+        "category": "lane_discipline",
+        "stl_formula": "G_[T1,T2]((ego performs a left turn) \u2192 ((p_0(t) \u2229 \u22c3 incorrect_lanes(t) is only transient and maneuver-necessary) \u2227 F_[0,\u03c4_turn](lane(0,t') is a compatible destination lane)))",
+        "value_semantics": "Per-step violation during left turn = max(opposing-lane overlap area beyond necessary transient encroachment, destination-lane incompatibility at completion). Units: m^2 overlap or lane-assignment incompatibility score. Trajectory aggregation: max."
+      },
+      {
+        "rule": "The driver does not drive the wrong way within a one-way or otherwise direction-constrained roadway segment.",
+        "category": "lane_discipline",
+        "stl_formula": "G_[T1,T2]((lane(0,t) \u2208 correct_lanes(t)) \u2228 (lane(0,t) is undefined inside an intersection polygon))",
+        "value_semantics": "Per-step violation = area(p_0(t) \u2229 \u22c3 incorrect_lanes(t)) in m^2 on direction-constrained roadway segments. 0 otherwise. Trajectory aggregation: max."
+      },
+      {
+        "rule": "The driver obeys the applicable lane speed limit whenever a speed limit is available for the ego\u2019s current lane.",
+        "category": "speed_control",
+        "stl_formula": "G_[T1,T2]((v_limit(lane(0,t))) is available \u2192 ||v_0(t)|| \u2264 v_limit(lane(0,t)))",
+        "value_semantics": "Per-step violation = max(0, ||v_0(t)|| - v_limit(lane(0,t))) in m/s, only when the current lane has a speed limit. Trajectory aggregation: sum."
+      },
+      {
+        "rule": "The driver does not travel too fast for local geometry and conflict conditions, including curves, intersections, merges, and dense traffic.",
+        "category": "speed_control",
+        "stl_formula": "G_[T1,T2](||v_0(t)|| \u2264 v_safe(t))",
+        "value_semantics": "Per-step violation = max(0, ||v_0(t)|| - v_safe(t)) in m/s, where v_safe(t) is an observable context-based safe speed derived from local curvature of traj_future_0(t), presence inside/near intersection polygons, lane transitions, and nearest-actor spacing d_poly(0,j,t). Trajectory aggregation: max."
+      },
+      {
+        "rule": "The driver does not impede traffic by traveling substantially slower than surrounding traffic without a geometric reason.",
+        "category": "speed_control",
+        "stl_formula": "G_[T1,T2](\u2200j \u2208 A_prox \u00b7 (lane(j,t) = lane(0,t) \u2227 j behind ego \u2192 ||v_0(t)|| \u2265 ||v_j(t)|| - \u0394v_impede) \u2228 p_0(t) inside constrained geometry)",
+        "value_semantics": "Per-step violation = max over relevant trailing same-lane vehicles j of max(0, ||v_j(t)|| - ||v_0(t)|| - \u0394v_impede), suppressed in intersections/turns/merges or other constrained geometry. Units: m/s speed shortfall. Trajectory aggregation: sum."
+      },
+      {
+        "rule": "The driver maintains a safe following distance behind a lead vehicle, expressed as distance or time headway shortfall.",
+        "category": "following_distance",
+        "stl_formula": "G_[T1,T2](\u2200j \u2208 A_all \u00b7 (j is lead vehicle in ego lane \u2192 (d_poly(0,j,t) \u2265 d_follow,min \u2228 d_cent(0,j,t)/max(\u03b5,||v_0(t)||) \u2265 \u03c4_headway)))",
+        "value_semantics": "Per-step violation = max over lead vehicles j of max(0, d_follow,min - d_poly(0,j,t), \u03c4_headway - d_cent(0,j,t)/max(\u03b5,||v_0(t)||)). Units: meters or seconds shortfall. Trajectory aggregation: sum."
+      },
+      {
+        "rule": "The driver does not cut in front of another vehicle with an unsafe post-merge headway.",
+        "category": "following_distance",
+        "stl_formula": "G_[T1,T2]((lane(0,t) \u2260 lane(0,t-0.1)) \u2192 \u2200j \u2208 A_all \u00b7 (j becomes trailing vehicle in new lane \u2192 d_cent(0,j,t)/max(\u03b5,||v_j(t)||) \u2265 \u03c4_postmerge))",
+        "value_semantics": "Per-step violation at/just after merge completion = max over newly trailing vehicles j of max(0, \u03c4_postmerge - d_cent(0,j,t)/max(\u03b5,||v_j(t)||)). Units: seconds headway shortfall. Trajectory aggregation: max."
+      },
+      {
+        "rule": "The driver leaves adequate lateral clearance when passing a bicyclist, with violation severity based on the shortfall below three feet.",
+        "category": "pedestrian_cyclist_safety",
+        "stl_formula": "G_[T1,T2](\u2200j \u2208 V_all \u00b7 (type(j) = Bicycle \u2227 passing event with ego \u2192 d_poly(0,j,t) \u2265 0.9144))",
+        "value_semantics": "Per-step violation = max over bicycles j being passed of max(0, 0.9144 - d_poly(0,j,t)) in meters. Trajectory aggregation: max."
+      },
+      {
+        "rule": "The driver does not pass a bicyclist, pedestrian, or other vulnerable road user with unreasonably small lateral clearance even when lane boundaries are ambiguous.",
+        "category": "pedestrian_cyclist_safety",
+        "stl_formula": "G_[T1,T2](\u2200j \u2208 V_all \u00b7 (passing event with ego \u2192 d_poly(0,j,t) \u2265 d_pass,Vru))",
+        "value_semantics": "Per-step violation = max over VRUs j being passed of max(0, d_pass,Vru - d_poly(0,j,t)) in meters. Lane boundaries are not needed; purely geometric clearance. Trajectory aggregation: max."
+      },
+      {
+        "rule": "The driver does not overtake or pass another vehicle when oncoming conflict geometry leaves insufficient space or time to return safely.",
+        "category": "collision_avoidance",
+        "stl_formula": "G_[T1,T2]((ego overtakes a vehicle) \u2192 \u2200j \u2208 A_all \u00b7 (j in opposing/conflicting lane \u2192 d_cent(0,j,t)/max(\u03b5,||v_0(t)-v_j(t)||) \u2265 \u03c4_overtake))",
+        "value_semantics": "Per-step violation during overtaking = max over oncoming/conflicting vehicles j of max(0, \u03c4_overtake - d_cent(0,j,t)/max(\u03b5,||v_0(t)-v_j(t)||)). Units: seconds available-gap shortfall. Trajectory aggregation: max."
+      },
+      {
+        "rule": "The driver does not drive directly alongside another vehicle for an extended time when avoidable and when lateral separation is small.",
+        "category": "other",
+        "stl_formula": "G_[T1,T2](\u2200j \u2208 A_prox \u00b7 ((small lateral separation and matched longitudinal position with j) \u2192 F_[0,\u03c4_side](\u00ac(small lateral separation and matched longitudinal position with j))))",
+        "value_semantics": "Per-step violation = for each nearby vehicle j, if ego remains side-by-side with small lateral gap beyond \u03c4_side, accumulate max(0, \u03c4_exposed(j,t) - \u03c4_side) or simply indicator\u00d7time-step weighted by max(0, d_side,min - d_poly(0,j,t)). Units: seconds or meter-shortfall\u00d7seconds. Trajectory aggregation: sum."
+      },
+      {
+        "rule": "The driver leaves enough space around large vehicles and does not merge directly in front of them with inadequate stopping margin.",
+        "category": "following_distance",
+        "stl_formula": "G_[T1,T2]((lane(0,t) \u2260 lane(0,t-0.1)) \u2192 \u2200j \u2208 A_all \u00b7 ((type(j)=Truck \u2228 large vehicle j) \u2227 j becomes trailing in new lane \u2192 d_cent(0,j,t)/max(\u03b5,||v_j(t)||) \u2265 \u03c4_truck))",
+        "value_semantics": "Per-step violation = max over large trailing vehicles j after merge of max(0, \u03c4_truck - d_cent(0,j,t)/max(\u03b5,||v_j(t)||), d_stop,j(t) - d_cent(0,j,t)). Captures extra stopping margin needed by large vehicles. Trajectory aggregation: max."
+      },
+      {
+        "rule": "The driver avoids sustained occupation of another vehicle\u2019s blind-spot region when close lateral proximity and matched longitudinal position make the situation hazardous.",
+        "category": "other",
+        "stl_formula": "G_[T1,T2](\u2200j \u2208 A_prox \u00b7 ((d_poly(0,j,t) \u2264 d_blind \u2227 matched longitudinal position with j) \u2192 F_[0,\u03c4_blind](\u00ac(d_poly(0,j,t) \u2264 d_blind \u2227 matched longitudinal position with j))))",
+        "value_semantics": "Per-step violation = accumulate time spent in a blind-spot-like region of nearby vehicle j beyond \u03c4_blind, weighted by proximity, e.g., max(0, \u03c4_occ(j,t)-\u03c4_blind) or max(0, d_blind-d_poly(0,j,t))\u00d7\u0394t. Trajectory aggregation: sum."
+      },
+      {
+        "rule": "The driver does not approach a stationary or slow actor so quickly that the remaining stopping distance becomes insufficient.",
+        "category": "collision_avoidance",
+        "stl_formula": "G_[T1,T2](\u2200j \u2208 (A_all \u222a V_all) \u00b7 ((||v_j(t)|| \u2264 v_slow) \u2192 d_cent(0,j,t) \u2265 d_stop,0(t)))",
+        "value_semantics": "Per-step violation = max over stationary/slow actors j of max(0, d_stop,0(t) - d_cent(0,j,t)) in meters. 0 if stopping distance is sufficient. Trajectory aggregation: max."
+      },
+      {
+        "rule": "The driver avoids excessive longitudinal acceleration that would indicate harsh or uncomfortable driving.",
+        "category": "other",
+        "stl_formula": "G_[T1,T2](a_long,0(t) \u2264 a_long,max)",
+        "value_semantics": "Per-step violation = max(0, a_long,0(t) - a_long,max) in m/s^2. Trajectory aggregation: sum."
+      },
+      {
+        "rule": "The driver avoids excessive braking deceleration that would indicate harsh or emergency braking beyond what the situation requires.",
+        "category": "other",
+        "stl_formula": "G_[T1,T2](a_long,0(t) \u2265 -a_brake,max)",
+        "value_semantics": "Per-step violation = max(0, -a_long,0(t) - a_brake,max) in m/s^2. Trajectory aggregation: sum."
+      },
+      {
+        "rule": "The driver avoids excessive jerk and therefore does not make abrupt changes in acceleration that create discomfort or instability.",
+        "category": "other",
+        "stl_formula": "G_[T1,T2](jerk_0(t) \u2264 jerk_max)",
+        "value_semantics": "Per-step violation = max(0, jerk_0(t) - jerk_max) in m/s^3. Trajectory aggregation: sum."
+      },
+      {
+        "rule": "The driver avoids excessive lateral acceleration in turns and lane changes.",
+        "category": "other",
+        "stl_formula": "G_[T1,T2](|a_lat,0(t)| \u2264 a_lat,max)",
+        "value_semantics": "Per-step violation = max(0, |a_lat,0(t)| - a_lat,max) in m/s^2. Trajectory aggregation: sum."
+      },
+      {
+        "rule": "The driver avoids combined high curvature and speed that produce uncomfortable or unstable cornering.",
+        "category": "speed_control",
+        "stl_formula": "G_[T1,T2](|a_lat,0(t)| \u2264 a_curve,max)",
+        "value_semantics": "Per-step violation = max(0, |a_lat,0(t)| - a_curve,max) in m/s^2. Since lateral acceleration already reflects speed-curvature combination, this directly measures excess cornering load. Trajectory aggregation: sum."
+      },
+      {
+        "rule": "The driver slows appropriately when negotiating a turn, merge, roundabout, or other constrained geometry so the maneuver remains smooth and controlled.",
+        "category": "speed_control",
+        "stl_formula": "G_[T1,T2]((ego is in a turn/merge/roundabout/constrained geometry) \u2192 ||v_0(t)|| \u2264 v_geom,safe(t))",
+        "value_semantics": "Per-step violation = max(0, ||v_0(t)|| - v_geom,safe(t)) in m/s during constrained-geometry maneuvers, where v_geom,safe is derived from lane geometry, turning curvature, and nearby conflict spacing. Trajectory aggregation: max."
+      },
+      {
+        "rule": "The driver does not stop in a travel lane or conflict area when a safe continuation was available and surrounding actors make the stop hazardous.",
+        "category": "other",
+        "stl_formula": "G_[T1,T2](((||v_0(t)|| \u2264 \u03b5_stop) \u2227 (lane(0,t) defined \u2228 p_0(t) inside intersection polygon)) \u2192 (\u00achazard_from_surrounding_actors(t) \u2228 \u00acsafe_continuation_available(t)))",
+        "value_semantics": "Per-step violation = while ego is stopped in a live lane/conflict area, accumulate hazard-weighted stop duration, e.g., indicator_stop \u00d7 max_j max(0, d_hazard - d_poly(0,j,t)) \u00d7 \u0394t. Units: meter-shortfall\u00d7seconds or seconds if binary hazard is used. Trajectory aggregation: sum."
+      },
+      {
+        "rule": "The driver, when passing a stopped or slow vulnerable road user nearby, reduces speed enough that low clearance is not compounded by high closing speed.",
+        "category": "pedestrian_cyclist_safety",
+        "stl_formula": "G_[T1,T2](\u2200j \u2208 V_all \u00b7 ((||v_j(t)|| \u2264 v_slow \u2227 passing event with ego \u2227 d_poly(0,j,t) \u2264 d_near) \u2192 ||v_0(t)-v_j(t)|| \u2264 v_pass,safe))",
+        "value_semantics": "Per-step violation = max over slow/stopped VRUs j of max(0, v_rel(0,j,t) - v_pass,safe) when d_poly(0,j,t) \u2264 d_near, optionally combined with clearance shortfall max(0, d_near-d_poly(0,j,t)). Units: m/s excess, optionally modulated by meters. Trajectory aggregation: max."
+      },
+      {
+        "rule": "The driver maintains extra caution near pedestrians by reducing speed and preserving a protective buffer when a pedestrian is near the ego path.",
+        "category": "pedestrian_cyclist_safety",
+        "stl_formula": "G_[T1,T2](\u2200j \u2208 V_all \u00b7 (type(j)=Pedestrian \u2227 d_poly(0,j,t) \u2264 d_ped,near \u2192 (d_poly(0,j,t) \u2265 d_ped,buf \u2227 ||v_0(t)|| \u2264 v_ped,safe)))",
+        "value_semantics": "Per-step violation = max over pedestrians j near ego path of max(0, d_ped,buf - d_poly(0,j,t), ||v_0(t)|| - v_ped,safe). Units: meters buffer shortfall or m/s speed excess; take the larger or normalized combination. Trajectory aggregation: max."
+      },
+      {
+        "rule": "The driver maintains extra caution near bicyclists by reducing speed and preserving a protective buffer when a bicyclist is near the ego path.",
+        "category": "pedestrian_cyclist_safety",
+        "stl_formula": "G_[T1,T2](\u2200j \u2208 V_all \u00b7 (type(j)=Bicycle \u2227 d_poly(0,j,t) \u2264 d_bike,near \u2192 (d_poly(0,j,t) \u2265 d_bike,buf \u2227 ||v_0(t)|| \u2264 v_bike,safe)))",
+        "value_semantics": "Per-step violation = max over bicyclists j near ego path of max(0, d_bike,buf - d_poly(0,j,t), ||v_0(t)|| - v_bike,safe). Units: meters or m/s. Trajectory aggregation: max."
+      },
+      {
+        "rule": "The driver does not create a near-collision during any merge, turn, pass, or lane change, even if contact is ultimately avoided.",
+        "category": "collision_avoidance",
+        "stl_formula": "G_[T1,T2]((ego is in a merge/turn/pass/lane-change maneuver) \u2192 \u2200j \u2208 (A_all \u222a V_all) \u00b7 ((d_poly(0,j,t) \u2265 d_nearmiss) \u2228 (d_cent(0,j,t)/max(\u03b5,||v_0(t)-v_j(t)||) \u2265 \u03c4_nearmiss)))",
+        "value_semantics": "Per-step violation during such maneuvers = max over actors j of max(0, d_nearmiss - d_poly(0,j,t), \u03c4_nearmiss - d_cent(0,j,t)/max(\u03b5,||v_0(t)-v_j(t)||)). Captures near-miss in either space or time. Trajectory aggregation: max."
+      },
+      {
+        "rule": "The driver does not remain in an intersection or junction conflict zone long enough to obstruct cross traffic or expose the vehicle to avoidable conflict.",
+        "category": "right_of_way",
+        "stl_formula": "G_[T1,T2]((p_0(t) inside an intersection polygon) \u2192 F_[0,\u03c4_int](p_0(t') outside all intersection polygons))",
+        "value_semantics": "Per-step violation = accumulate excess intersection occupancy duration max(0, \u03c4_occ,int(t) - \u03c4_int) in seconds while ego remains in the conflict zone. Trajectory aggregation: sum."
+      },
+      {
+        "rule": "The driver does not reverse or otherwise move contrary to lane direction in a live lane when surrounding traffic makes the maneuver hazardous.",
+        "category": "lane_discipline",
+        "stl_formula": "G_[T1,T2](((lane(0,t) \u2208 incorrect_lanes(t)) \u2228 (lane(0,t)=L_k \u2227 v_0(t) projected on orientation(L_k) < 0)) \u2192 \u2200j \u2208 A_all \u00b7 d_poly(0,j,t) \u2265 d_contrary,safe)",
+        "value_semantics": "Per-step violation = when ego moves opposite lane direction or reverses in a live lane, max over nearby vehicles j of max(0, d_contrary,safe - d_poly(0,j,t)), optionally combined with wrong-way lane overlap area. Units: meters shortfall (and optionally m^2 lane-overlap). Trajectory aggregation: max."
+      }
+    ]
+  },
+  "stl_examples": {
+    "no_collisions_vru": {
+      "title": "No collisions with Vulnerable Road Users (VRUs)",
+      "stl_formula": "G_{[T_1, T_2]}(\u2200j \u2208 V \u00b7 (p_0(t) \u2229 p_j(t) = \u2205))",
+      "value_sum": "\u03a3_{j \u2208 J} E_{ego_loss} + E_{vru_j_gain}, where E is kinetic energy",
+      "description": "Ensures ego vehicle never collides with pedestrians/cyclists"
+    },
+    "no_collisions_vehicles": {
+      "title": "No collisions with other vehicles",
+      "stl_formula": "G_{[T_1, T_2]}(\u2200i \u2208 A \u00b7 (p_0(t) \u2229 p_i(t) = \u2205))",
+      "value_sum": "\u03a3_{i \u2208 A} E_{ego_loss} + E_{vehicle_i_loss}, where E is kinetic energy",
+      "description": "Ensures ego vehicle never collides with other vehicles"
+    },
+    "drivable_area": {
+      "title": "Staying within the drivable area",
+      "stl_formula": "G_{[T_1, T_2]}(p_0(t) \u2286 R_{driv}(t))",
+      "value_sum": "max_t (||p_0(t) \\ R_{driv}(t)|| + d(p_0(t), R_{driv}(t))^2)",
+      "description": "Ensures ego vehicle trajectory remains within drivable road region"
+    }
+  },
+  "implemented_rules": [
+    {
+      "rule": "The driver does not allow the ego vehicle to collide with any vehicle, pedestrian, or bicyclist.",
+      "category": "collision_avoidance",
+      "branch": "rule/000-collision_avoidance-allow_ego_vehicle_collide_vehicle_p",
+      "scenario_name": "generated_rule_100",
+      "scenario_path": "scenarios/generated/generated_rule_100.scenic",
+      "status": "cached"
+    },
+    {
+      "rule": "The driver maintains enough time-to-collision and stopping margin to avoid imminent conflict with any vehicle, pedestrian, or bicyclist ahead or on a crossing path.",
+      "category": "collision_avoidance",
+      "branch": "rule/001-collision_avoidance-maintains_enough_timetocollision_st",
+      "scenario_name": "generated_rule_101",
+      "scenario_path": "scenarios/generated/generated_rule_101.scenic",
+      "status": "cached"
+    },
+    {
+      "rule": "The driver yields when entering a lane, merging, or crossing into traffic and does not force another road user to brake sharply or take evasive action.",
+      "category": "right_of_way",
+      "branch": "rule/002-right_of_way-yields_entering_lane_merging_crossi",
+      "scenario_name": "generated_rule_102",
+      "scenario_path": "scenarios/generated/generated_rule_102.scenic",
+      "status": "cached"
+    },
+    {
+      "rule": "The driver yields before turning left across the path of an oncoming vehicle, bicyclist, or pedestrian when the gap is too small for safe completion.",
+      "category": "right_of_way",
+      "branch": "rule/003-right_of_way-yields_before_turning_left_across_p",
+      "scenario_name": "generated_rule_103",
+      "scenario_path": "scenarios/generated/generated_rule_103.scenic",
+      "status": "cached"
+    },
+    {
+      "rule": "The driver yields before turning right when a pedestrian, bicyclist, or motorcyclist is in or dangerously near the turning path.",
+      "category": "pedestrian_cyclist_safety",
+      "branch": "rule/004-pedestrian_cyclist_safety-yields_before_turning_right_pedestr",
+      "scenario_name": "generated_rule_104",
+      "scenario_path": "scenarios/generated/generated_rule_104.scenic",
+      "status": "cached"
+    },
+    {
+      "rule": "The driver yields to traffic already circulating in a roundabout and enters only when a safe gap exists.",
+      "category": "right_of_way",
+      "branch": "rule/005-right_of_way-yields_traffic_already_circulating",
+      "scenario_name": "generated_rule_105",
+      "scenario_path": "scenarios/generated/generated_rule_105.scenic",
+      "status": "cached"
+    },
+    {
+      "rule": "The driver does not enter an intersection or conflicting area unless there is enough downstream space to clear it without stopping in conflict.",
+      "category": "right_of_way",
+      "branch": "rule/006-right_of_way-enter_intersection_conflicting_area",
+      "scenario_name": "generated_rule_106",
+      "scenario_path": "scenarios/generated/generated_rule_106.scenic",
+      "status": "cached"
+    },
+    {
+      "rule": "The driver stays entirely within the drivable region and does not let any part of the ego footprint leave the roadway.",
+      "category": "lane_discipline",
+      "branch": "rule/007-lane_discipline-stays_entirely_within_drivable_regi",
+      "scenario_name": "generated_rule_107",
+      "scenario_path": "scenarios/generated/generated_rule_107.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver travels in a lane whose direction matches the ego heading and does not proceed in an incorrect-direction lane.",
+      "category": "lane_discipline",
+      "branch": "rule/008-lane_discipline-travels_lane_whose_direction_matche",
+      "scenario_name": "generated_rule_108",
+      "scenario_path": "scenarios/generated/generated_rule_108.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver keeps to the correct side of the road and does not drive into opposing traffic lanes except when a lawful maneuver is geometrically necessary.",
+      "category": "lane_discipline",
+      "branch": "rule/009-lane_discipline-keeps_correct_side_road_drive_oppos",
+      "scenario_name": "generated_rule_109",
+      "scenario_path": "scenarios/generated/generated_rule_109.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver maintains lane discipline and does not straddle multiple lanes without committing to a lane change.",
+      "category": "lane_discipline",
+      "branch": "rule/010-lane_discipline-maintains_lane_discipline_straddle",
+      "scenario_name": "generated_rule_110",
+      "scenario_path": "scenarios/generated/generated_rule_110.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver performs lane changes only when adjacent-lane clearance and relative motion make the maneuver safe.",
+      "category": "lane_discipline",
+      "branch": "rule/011-lane_discipline-performs_lane_changes_only_adjacent",
+      "scenario_name": "generated_rule_111",
+      "scenario_path": "scenarios/generated/generated_rule_111.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver completes a lane change smoothly, without abrupt lateral motion or cutting in with insufficient longitudinal gap.",
+      "category": "lane_discipline",
+      "branch": "rule/012-lane_discipline-completes_lane_change_smoothly_abru",
+      "scenario_name": "generated_rule_112",
+      "scenario_path": "scenarios/generated/generated_rule_112.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver stays reasonably centered within the current lane when not intentionally changing lanes or navigating an intersection.",
+      "category": "lane_discipline",
+      "branch": "rule/013-lane_discipline-stays_reasonably_centered_within_cu",
+      "scenario_name": "generated_rule_113",
+      "scenario_path": "scenarios/generated/generated_rule_113.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver does not weave repeatedly across lanes or make unnecessary successive lane changes.",
+      "category": "lane_discipline",
+      "branch": "rule/014-lane_discipline-weave_repeatedly_across_lanes_make",
+      "scenario_name": "generated_rule_114",
+      "scenario_path": "scenarios/generated/generated_rule_114.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver enters and exits lanes only through geometrically permitted openings and does not cross lane barriers that should not be crossed.",
+      "category": "lane_discipline",
+      "branch": "rule/015-lane_discipline-enters_exits_lanes_only_through_geo",
+      "scenario_name": "generated_rule_115",
+      "scenario_path": "scenarios/generated/generated_rule_115.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver uses the proper lane for a turn and does not begin a turn from a lane inconsistent with the road geometry.",
+      "category": "lane_discipline",
+      "branch": "rule/016-lane_discipline-uses_proper_lane_turn_begin_turn_la",
+      "scenario_name": "generated_rule_116",
+      "scenario_path": "scenarios/generated/generated_rule_116.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver completes a right turn into the nearest appropriate lane and does not swing wide into an adjacent lane.",
+      "category": "lane_discipline",
+      "branch": "rule/017-lane_discipline-completes_right_turn_nearest_approp",
+      "scenario_name": "generated_rule_117",
+      "scenario_path": "scenarios/generated/generated_rule_117.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver completes a left turn without encroaching into an opposing lane more than necessary and ends in a compatible destination lane.",
+      "category": "lane_discipline",
+      "branch": "rule/018-lane_discipline-completes_left_turn_encroaching_opp",
+      "scenario_name": "generated_rule_118",
+      "scenario_path": "scenarios/generated/generated_rule_118.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver does not drive the wrong way within a one-way or otherwise direction-constrained roadway segment.",
+      "category": "lane_discipline",
+      "branch": "rule/019-lane_discipline-drive_wrong_way_within_oneway_other",
+      "scenario_name": "generated_rule_119",
+      "scenario_path": "scenarios/generated/generated_rule_119.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver obeys the applicable lane speed limit whenever a speed limit is available for the ego\u2019s current lane.",
+      "category": "speed_control",
+      "branch": "rule/020-speed_control-obeys_applicable_lane_speed_limit_w",
+      "scenario_name": "generated_rule_120",
+      "scenario_path": "scenarios/generated/generated_rule_120.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver does not travel too fast for local geometry and conflict conditions, including curves, intersections, merges, and dense traffic.",
+      "category": "speed_control",
+      "branch": "rule/021-speed_control-travel_fast_local_geometry_conflict",
+      "scenario_name": "generated_rule_121",
+      "scenario_path": "scenarios/generated/generated_rule_121.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver does not impede traffic by traveling substantially slower than surrounding traffic without a geometric reason.",
+      "category": "speed_control",
+      "branch": "rule/022-speed_control-impede_traffic_traveling_substantia",
+      "scenario_name": "generated_rule_122",
+      "scenario_path": "scenarios/generated/generated_rule_122.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver maintains a safe following distance behind a lead vehicle, expressed as distance or time headway shortfall.",
+      "category": "following_distance",
+      "branch": "rule/023-following_distance-maintains_safe_following_distance_b",
+      "scenario_name": "generated_rule_123",
+      "scenario_path": "scenarios/generated/generated_rule_123.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver does not cut in front of another vehicle with an unsafe post-merge headway.",
+      "category": "following_distance",
+      "branch": "rule/024-following_distance-cut_front_another_vehicle_unsafe_po",
+      "scenario_name": "generated_rule_124",
+      "scenario_path": "scenarios/generated/generated_rule_124.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver leaves adequate lateral clearance when passing a bicyclist, with violation severity based on the shortfall below three feet.",
+      "category": "pedestrian_cyclist_safety",
+      "branch": "rule/025-pedestrian_cyclist_safety-leaves_adequate_lateral_clearance_p",
+      "scenario_name": "generated_rule_125",
+      "scenario_path": "scenarios/generated/generated_rule_125.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver does not pass a bicyclist, pedestrian, or other vulnerable road user with unreasonably small lateral clearance even when lane boundaries are ambiguous.",
+      "category": "pedestrian_cyclist_safety",
+      "branch": "rule/026-pedestrian_cyclist_safety-pass_bicyclist_pedestrian_other_vul",
+      "scenario_name": "generated_rule_126",
+      "scenario_path": "scenarios/generated/generated_rule_126.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver does not overtake or pass another vehicle when oncoming conflict geometry leaves insufficient space or time to return safely.",
+      "category": "collision_avoidance",
+      "branch": "rule/027-collision_avoidance-overtake_pass_another_vehicle_oncom",
+      "scenario_name": "generated_rule_127",
+      "scenario_path": "scenarios/generated/generated_rule_127.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver does not drive directly alongside another vehicle for an extended time when avoidable and when lateral separation is small.",
+      "category": "other",
+      "branch": "rule/028-other-drive_directly_alongside_another_ve",
+      "scenario_name": "generated_rule_128",
+      "scenario_path": "scenarios/generated/generated_rule_128.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver leaves enough space around large vehicles and does not merge directly in front of them with inadequate stopping margin.",
+      "category": "following_distance",
+      "branch": "rule/029-following_distance-leaves_enough_space_around_large_ve",
+      "scenario_name": "generated_rule_129",
+      "scenario_path": "scenarios/generated/generated_rule_129.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver avoids sustained occupation of another vehicle\u2019s blind-spot region when close lateral proximity and matched longitudinal position make the situation hazardous.",
+      "category": "other",
+      "branch": "rule/030-other-avoids_sustained_occupation_another",
+      "scenario_name": "generated_rule_130",
+      "scenario_path": "scenarios/generated/generated_rule_130.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver does not approach a stationary or slow actor so quickly that the remaining stopping distance becomes insufficient.",
+      "category": "collision_avoidance",
+      "branch": "rule/031-collision_avoidance-approach_stationary_slow_actor_quic",
+      "scenario_name": "generated_rule_131",
+      "scenario_path": "scenarios/generated/generated_rule_131.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver avoids excessive longitudinal acceleration that would indicate harsh or uncomfortable driving.",
+      "category": "other",
+      "branch": "rule/032-other-avoids_excessive_longitudinal_accel",
+      "scenario_name": "generated_rule_132",
+      "scenario_path": "scenarios/generated/generated_rule_132.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver avoids excessive braking deceleration that would indicate harsh or emergency braking beyond what the situation requires.",
+      "category": "other",
+      "branch": "rule/033-other-avoids_excessive_braking_decelerati",
+      "scenario_name": "generated_rule_133",
+      "scenario_path": "scenarios/generated/generated_rule_133.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver avoids excessive jerk and therefore does not make abrupt changes in acceleration that create discomfort or instability.",
+      "category": "other",
+      "branch": "rule/034-other-avoids_excessive_jerk_therefore_mak",
+      "scenario_name": "generated_rule_134",
+      "scenario_path": "scenarios/generated/generated_rule_134.scenic",
+      "status": "empty"
+    },
+    {
+      "rule": "The driver avoids excessive lateral acceleration in turns and lane changes.",
+      "category": "other",
+      "branch": "rule/035-other-avoids_excessive_lateral_accelerati",
+      "scenario_name": "generated_rule_135",
+      "scenario_path": "scenarios/generated/generated_rule_135.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver avoids combined high curvature and speed that produce uncomfortable or unstable cornering.",
+      "category": "speed_control",
+      "branch": "rule/036-speed_control-avoids_combined_high_curvature_spee",
+      "scenario_name": "generated_rule_136",
+      "scenario_path": "scenarios/generated/generated_rule_136.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver slows appropriately when negotiating a turn, merge, roundabout, or other constrained geometry so the maneuver remains smooth and controlled.",
+      "category": "speed_control",
+      "branch": "rule/037-speed_control-slows_appropriately_negotiating_tur",
+      "scenario_name": "generated_rule_137",
+      "scenario_path": "scenarios/generated/generated_rule_137.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver does not stop in a travel lane or conflict area when a safe continuation was available and surrounding actors make the stop hazardous.",
+      "category": "other",
+      "branch": "rule/038-other-stop_travel_lane_conflict_area_safe",
+      "scenario_name": "generated_rule_138",
+      "scenario_path": "scenarios/generated/generated_rule_138.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver, when passing a stopped or slow vulnerable road user nearby, reduces speed enough that low clearance is not compounded by high closing speed.",
+      "category": "pedestrian_cyclist_safety",
+      "branch": "rule/039-pedestrian_cyclist_safety-passing_stopped_slow_vulnerable_roa",
+      "scenario_name": "generated_rule_139",
+      "scenario_path": "scenarios/generated/generated_rule_139.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver maintains extra caution near pedestrians by reducing speed and preserving a protective buffer when a pedestrian is near the ego path.",
+      "category": "pedestrian_cyclist_safety",
+      "branch": "rule/040-pedestrian_cyclist_safety-maintains_extra_caution_near_pedest",
+      "scenario_name": "generated_rule_140",
+      "scenario_path": "scenarios/generated/generated_rule_140.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver maintains extra caution near bicyclists by reducing speed and preserving a protective buffer when a bicyclist is near the ego path.",
+      "category": "pedestrian_cyclist_safety",
+      "branch": "rule/041-pedestrian_cyclist_safety-maintains_extra_caution_near_bicycl",
+      "scenario_name": "generated_rule_141",
+      "scenario_path": "scenarios/generated/generated_rule_141.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver does not create a near-collision during any merge, turn, pass, or lane change, even if contact is ultimately avoided.",
+      "category": "collision_avoidance",
+      "branch": "rule/042-collision_avoidance-create_nearcollision_during_merge_t",
+      "scenario_name": "generated_rule_142",
+      "scenario_path": "scenarios/generated/generated_rule_142.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver does not remain in an intersection or junction conflict zone long enough to obstruct cross traffic or expose the vehicle to avoidable conflict.",
+      "category": "right_of_way",
+      "branch": "rule/043-right_of_way-remain_intersection_junction_confli",
+      "scenario_name": "generated_rule_143",
+      "scenario_path": "scenarios/generated/generated_rule_143.scenic",
+      "status": "error"
+    },
+    {
+      "rule": "The driver does not reverse or otherwise move contrary to lane direction in a live lane when surrounding traffic makes the maneuver hazardous.",
+      "category": "lane_discipline",
+      "branch": "rule/044-lane_discipline-reverse_otherwise_move_contrary_lan",
+      "scenario_name": "generated_rule_144",
+      "scenario_path": "scenarios/generated/generated_rule_144.scenic",
+      "status": "error"
+    }
+  ],
+  "rule_scenario_manifest": {
+    "path": "generated_rule_scenarios.json",
+    "entries": [
+      {
+        "rule": "The driver does not allow the ego vehicle to collide with any vehicle, pedestrian, or bicyclist.",
+        "category": "collision_avoidance",
+        "branch": "rule/000-collision_avoidance-allow_ego_vehicle_collide_vehicle_p",
+        "scenario_name": "generated_rule_100",
+        "scenario_path": "scenarios/generated/generated_rule_100.scenic",
+        "status": "cached"
+      },
+      {
+        "rule": "The driver maintains enough time-to-collision and stopping margin to avoid imminent conflict with any vehicle, pedestrian, or bicyclist ahead or on a crossing path.",
+        "category": "collision_avoidance",
+        "branch": "rule/001-collision_avoidance-maintains_enough_timetocollision_st",
+        "scenario_name": "generated_rule_101",
+        "scenario_path": "scenarios/generated/generated_rule_101.scenic",
+        "status": "cached"
+      },
+      {
+        "rule": "The driver yields when entering a lane, merging, or crossing into traffic and does not force another road user to brake sharply or take evasive action.",
+        "category": "right_of_way",
+        "branch": "rule/002-right_of_way-yields_entering_lane_merging_crossi",
+        "scenario_name": "generated_rule_102",
+        "scenario_path": "scenarios/generated/generated_rule_102.scenic",
+        "status": "cached"
+      },
+      {
+        "rule": "The driver yields before turning left across the path of an oncoming vehicle, bicyclist, or pedestrian when the gap is too small for safe completion.",
+        "category": "right_of_way",
+        "branch": "rule/003-right_of_way-yields_before_turning_left_across_p",
+        "scenario_name": "generated_rule_103",
+        "scenario_path": "scenarios/generated/generated_rule_103.scenic",
+        "status": "cached"
+      },
+      {
+        "rule": "The driver yields before turning right when a pedestrian, bicyclist, or motorcyclist is in or dangerously near the turning path.",
+        "category": "pedestrian_cyclist_safety",
+        "branch": "rule/004-pedestrian_cyclist_safety-yields_before_turning_right_pedestr",
+        "scenario_name": "generated_rule_104",
+        "scenario_path": "scenarios/generated/generated_rule_104.scenic",
+        "status": "cached"
+      },
+      {
+        "rule": "The driver yields to traffic already circulating in a roundabout and enters only when a safe gap exists.",
+        "category": "right_of_way",
+        "branch": "rule/005-right_of_way-yields_traffic_already_circulating",
+        "scenario_name": "generated_rule_105",
+        "scenario_path": "scenarios/generated/generated_rule_105.scenic",
+        "status": "cached"
+      },
+      {
+        "rule": "The driver does not enter an intersection or conflicting area unless there is enough downstream space to clear it without stopping in conflict.",
+        "category": "right_of_way",
+        "branch": "rule/006-right_of_way-enter_intersection_conflicting_area",
+        "scenario_name": "generated_rule_106",
+        "scenario_path": "scenarios/generated/generated_rule_106.scenic",
+        "status": "cached"
+      },
+      {
+        "rule": "The driver stays entirely within the drivable region and does not let any part of the ego footprint leave the roadway.",
+        "category": "lane_discipline",
+        "branch": "rule/007-lane_discipline-stays_entirely_within_drivable_regi",
+        "scenario_name": "generated_rule_107",
+        "scenario_path": "scenarios/generated/generated_rule_107.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver travels in a lane whose direction matches the ego heading and does not proceed in an incorrect-direction lane.",
+        "category": "lane_discipline",
+        "branch": "rule/008-lane_discipline-travels_lane_whose_direction_matche",
+        "scenario_name": "generated_rule_108",
+        "scenario_path": "scenarios/generated/generated_rule_108.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver keeps to the correct side of the road and does not drive into opposing traffic lanes except when a lawful maneuver is geometrically necessary.",
+        "category": "lane_discipline",
+        "branch": "rule/009-lane_discipline-keeps_correct_side_road_drive_oppos",
+        "scenario_name": "generated_rule_109",
+        "scenario_path": "scenarios/generated/generated_rule_109.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver maintains lane discipline and does not straddle multiple lanes without committing to a lane change.",
+        "category": "lane_discipline",
+        "branch": "rule/010-lane_discipline-maintains_lane_discipline_straddle",
+        "scenario_name": "generated_rule_110",
+        "scenario_path": "scenarios/generated/generated_rule_110.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver performs lane changes only when adjacent-lane clearance and relative motion make the maneuver safe.",
+        "category": "lane_discipline",
+        "branch": "rule/011-lane_discipline-performs_lane_changes_only_adjacent",
+        "scenario_name": "generated_rule_111",
+        "scenario_path": "scenarios/generated/generated_rule_111.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver completes a lane change smoothly, without abrupt lateral motion or cutting in with insufficient longitudinal gap.",
+        "category": "lane_discipline",
+        "branch": "rule/012-lane_discipline-completes_lane_change_smoothly_abru",
+        "scenario_name": "generated_rule_112",
+        "scenario_path": "scenarios/generated/generated_rule_112.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver stays reasonably centered within the current lane when not intentionally changing lanes or navigating an intersection.",
+        "category": "lane_discipline",
+        "branch": "rule/013-lane_discipline-stays_reasonably_centered_within_cu",
+        "scenario_name": "generated_rule_113",
+        "scenario_path": "scenarios/generated/generated_rule_113.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver does not weave repeatedly across lanes or make unnecessary successive lane changes.",
+        "category": "lane_discipline",
+        "branch": "rule/014-lane_discipline-weave_repeatedly_across_lanes_make",
+        "scenario_name": "generated_rule_114",
+        "scenario_path": "scenarios/generated/generated_rule_114.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver enters and exits lanes only through geometrically permitted openings and does not cross lane barriers that should not be crossed.",
+        "category": "lane_discipline",
+        "branch": "rule/015-lane_discipline-enters_exits_lanes_only_through_geo",
+        "scenario_name": "generated_rule_115",
+        "scenario_path": "scenarios/generated/generated_rule_115.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver uses the proper lane for a turn and does not begin a turn from a lane inconsistent with the road geometry.",
+        "category": "lane_discipline",
+        "branch": "rule/016-lane_discipline-uses_proper_lane_turn_begin_turn_la",
+        "scenario_name": "generated_rule_116",
+        "scenario_path": "scenarios/generated/generated_rule_116.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver completes a right turn into the nearest appropriate lane and does not swing wide into an adjacent lane.",
+        "category": "lane_discipline",
+        "branch": "rule/017-lane_discipline-completes_right_turn_nearest_approp",
+        "scenario_name": "generated_rule_117",
+        "scenario_path": "scenarios/generated/generated_rule_117.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver completes a left turn without encroaching into an opposing lane more than necessary and ends in a compatible destination lane.",
+        "category": "lane_discipline",
+        "branch": "rule/018-lane_discipline-completes_left_turn_encroaching_opp",
+        "scenario_name": "generated_rule_118",
+        "scenario_path": "scenarios/generated/generated_rule_118.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver does not drive the wrong way within a one-way or otherwise direction-constrained roadway segment.",
+        "category": "lane_discipline",
+        "branch": "rule/019-lane_discipline-drive_wrong_way_within_oneway_other",
+        "scenario_name": "generated_rule_119",
+        "scenario_path": "scenarios/generated/generated_rule_119.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver obeys the applicable lane speed limit whenever a speed limit is available for the ego\u2019s current lane.",
+        "category": "speed_control",
+        "branch": "rule/020-speed_control-obeys_applicable_lane_speed_limit_w",
+        "scenario_name": "generated_rule_120",
+        "scenario_path": "scenarios/generated/generated_rule_120.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver does not travel too fast for local geometry and conflict conditions, including curves, intersections, merges, and dense traffic.",
+        "category": "speed_control",
+        "branch": "rule/021-speed_control-travel_fast_local_geometry_conflict",
+        "scenario_name": "generated_rule_121",
+        "scenario_path": "scenarios/generated/generated_rule_121.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver does not impede traffic by traveling substantially slower than surrounding traffic without a geometric reason.",
+        "category": "speed_control",
+        "branch": "rule/022-speed_control-impede_traffic_traveling_substantia",
+        "scenario_name": "generated_rule_122",
+        "scenario_path": "scenarios/generated/generated_rule_122.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver maintains a safe following distance behind a lead vehicle, expressed as distance or time headway shortfall.",
+        "category": "following_distance",
+        "branch": "rule/023-following_distance-maintains_safe_following_distance_b",
+        "scenario_name": "generated_rule_123",
+        "scenario_path": "scenarios/generated/generated_rule_123.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver does not cut in front of another vehicle with an unsafe post-merge headway.",
+        "category": "following_distance",
+        "branch": "rule/024-following_distance-cut_front_another_vehicle_unsafe_po",
+        "scenario_name": "generated_rule_124",
+        "scenario_path": "scenarios/generated/generated_rule_124.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver leaves adequate lateral clearance when passing a bicyclist, with violation severity based on the shortfall below three feet.",
+        "category": "pedestrian_cyclist_safety",
+        "branch": "rule/025-pedestrian_cyclist_safety-leaves_adequate_lateral_clearance_p",
+        "scenario_name": "generated_rule_125",
+        "scenario_path": "scenarios/generated/generated_rule_125.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver does not pass a bicyclist, pedestrian, or other vulnerable road user with unreasonably small lateral clearance even when lane boundaries are ambiguous.",
+        "category": "pedestrian_cyclist_safety",
+        "branch": "rule/026-pedestrian_cyclist_safety-pass_bicyclist_pedestrian_other_vul",
+        "scenario_name": "generated_rule_126",
+        "scenario_path": "scenarios/generated/generated_rule_126.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver does not overtake or pass another vehicle when oncoming conflict geometry leaves insufficient space or time to return safely.",
+        "category": "collision_avoidance",
+        "branch": "rule/027-collision_avoidance-overtake_pass_another_vehicle_oncom",
+        "scenario_name": "generated_rule_127",
+        "scenario_path": "scenarios/generated/generated_rule_127.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver does not drive directly alongside another vehicle for an extended time when avoidable and when lateral separation is small.",
+        "category": "other",
+        "branch": "rule/028-other-drive_directly_alongside_another_ve",
+        "scenario_name": "generated_rule_128",
+        "scenario_path": "scenarios/generated/generated_rule_128.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver leaves enough space around large vehicles and does not merge directly in front of them with inadequate stopping margin.",
+        "category": "following_distance",
+        "branch": "rule/029-following_distance-leaves_enough_space_around_large_ve",
+        "scenario_name": "generated_rule_129",
+        "scenario_path": "scenarios/generated/generated_rule_129.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver avoids sustained occupation of another vehicle\u2019s blind-spot region when close lateral proximity and matched longitudinal position make the situation hazardous.",
+        "category": "other",
+        "branch": "rule/030-other-avoids_sustained_occupation_another",
+        "scenario_name": "generated_rule_130",
+        "scenario_path": "scenarios/generated/generated_rule_130.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver does not approach a stationary or slow actor so quickly that the remaining stopping distance becomes insufficient.",
+        "category": "collision_avoidance",
+        "branch": "rule/031-collision_avoidance-approach_stationary_slow_actor_quic",
+        "scenario_name": "generated_rule_131",
+        "scenario_path": "scenarios/generated/generated_rule_131.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver avoids excessive longitudinal acceleration that would indicate harsh or uncomfortable driving.",
+        "category": "other",
+        "branch": "rule/032-other-avoids_excessive_longitudinal_accel",
+        "scenario_name": "generated_rule_132",
+        "scenario_path": "scenarios/generated/generated_rule_132.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver avoids excessive braking deceleration that would indicate harsh or emergency braking beyond what the situation requires.",
+        "category": "other",
+        "branch": "rule/033-other-avoids_excessive_braking_decelerati",
+        "scenario_name": "generated_rule_133",
+        "scenario_path": "scenarios/generated/generated_rule_133.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver avoids excessive jerk and therefore does not make abrupt changes in acceleration that create discomfort or instability.",
+        "category": "other",
+        "branch": "rule/034-other-avoids_excessive_jerk_therefore_mak",
+        "scenario_name": "generated_rule_134",
+        "scenario_path": "scenarios/generated/generated_rule_134.scenic",
+        "status": "empty"
+      },
+      {
+        "rule": "The driver avoids excessive lateral acceleration in turns and lane changes.",
+        "category": "other",
+        "branch": "rule/035-other-avoids_excessive_lateral_accelerati",
+        "scenario_name": "generated_rule_135",
+        "scenario_path": "scenarios/generated/generated_rule_135.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver avoids combined high curvature and speed that produce uncomfortable or unstable cornering.",
+        "category": "speed_control",
+        "branch": "rule/036-speed_control-avoids_combined_high_curvature_spee",
+        "scenario_name": "generated_rule_136",
+        "scenario_path": "scenarios/generated/generated_rule_136.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver slows appropriately when negotiating a turn, merge, roundabout, or other constrained geometry so the maneuver remains smooth and controlled.",
+        "category": "speed_control",
+        "branch": "rule/037-speed_control-slows_appropriately_negotiating_tur",
+        "scenario_name": "generated_rule_137",
+        "scenario_path": "scenarios/generated/generated_rule_137.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver does not stop in a travel lane or conflict area when a safe continuation was available and surrounding actors make the stop hazardous.",
+        "category": "other",
+        "branch": "rule/038-other-stop_travel_lane_conflict_area_safe",
+        "scenario_name": "generated_rule_138",
+        "scenario_path": "scenarios/generated/generated_rule_138.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver, when passing a stopped or slow vulnerable road user nearby, reduces speed enough that low clearance is not compounded by high closing speed.",
+        "category": "pedestrian_cyclist_safety",
+        "branch": "rule/039-pedestrian_cyclist_safety-passing_stopped_slow_vulnerable_roa",
+        "scenario_name": "generated_rule_139",
+        "scenario_path": "scenarios/generated/generated_rule_139.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver maintains extra caution near pedestrians by reducing speed and preserving a protective buffer when a pedestrian is near the ego path.",
+        "category": "pedestrian_cyclist_safety",
+        "branch": "rule/040-pedestrian_cyclist_safety-maintains_extra_caution_near_pedest",
+        "scenario_name": "generated_rule_140",
+        "scenario_path": "scenarios/generated/generated_rule_140.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver maintains extra caution near bicyclists by reducing speed and preserving a protective buffer when a bicyclist is near the ego path.",
+        "category": "pedestrian_cyclist_safety",
+        "branch": "rule/041-pedestrian_cyclist_safety-maintains_extra_caution_near_bicycl",
+        "scenario_name": "generated_rule_141",
+        "scenario_path": "scenarios/generated/generated_rule_141.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver does not create a near-collision during any merge, turn, pass, or lane change, even if contact is ultimately avoided.",
+        "category": "collision_avoidance",
+        "branch": "rule/042-collision_avoidance-create_nearcollision_during_merge_t",
+        "scenario_name": "generated_rule_142",
+        "scenario_path": "scenarios/generated/generated_rule_142.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver does not remain in an intersection or junction conflict zone long enough to obstruct cross traffic or expose the vehicle to avoidable conflict.",
+        "category": "right_of_way",
+        "branch": "rule/043-right_of_way-remain_intersection_junction_confli",
+        "scenario_name": "generated_rule_143",
+        "scenario_path": "scenarios/generated/generated_rule_143.scenic",
+        "status": "error"
+      },
+      {
+        "rule": "The driver does not reverse or otherwise move contrary to lane direction in a live lane when surrounding traffic makes the maneuver hazardous.",
+        "category": "lane_discipline",
+        "branch": "rule/044-lane_discipline-reverse_otherwise_move_contrary_lan",
+        "scenario_name": "generated_rule_144",
+        "scenario_path": "scenarios/generated/generated_rule_144.scenic",
+        "status": "error"
+      }
+    ]
+  }
+}
